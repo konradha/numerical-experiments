@@ -12,9 +12,9 @@ def calculate_energy(u, v, nx, ny, dx, dy):
     uy2 = uy**2
     ut2 = ut**2
     cos = 2*(1 - np.cos(u[1:-1, 1:-1]))
-    integrand = ux2 + uy2 + ut2 + cos
+    integrand = np.sum(ux2 + uy2 + ut2 + cos)
     # simple trapeziodal rule
-    return 0.5 * np.sum(integrand) * dx * dy
+    return 0.5 * integrand * dx * dy
 
 class SineGordonIntegrator:
     def __init__(self, L, T, nt, nx, ny):
@@ -81,7 +81,7 @@ class SineGordonIntegrator:
         dy = abs(self.ymax - self.ymin) / (self.ny - 1)
         dt = self.dt
 
-        # u's ghost cells get an averaging
+        # u's ghost cells
         u[0, 1:-1] = u[1, 1:-1] - dx*self.boundary_x(self.xmin, self.yn[1:-1], t)
         u[-1, 1:-1] = u[-2, 1:-1] + dx*self.boundary_x(self.xmax, self.yn[1:-1], t)
         
@@ -224,9 +224,10 @@ def analytical_velocity(x, y, t):
 if __name__ == '__main__':
 
     L = 7 
-    T = 15
+    T = 30
     nt = 1001
-    nx, ny = 54 + 2, 54 + 2
+    #nx, ny = 54 + 2, 54 + 2
+    nx, ny = 130, 130
     solver = SineGordonIntegrator(L, T, nt, nx, ny)
     solver.evolve()
     
@@ -320,7 +321,10 @@ if __name__ == '__main__':
                 solver.nx, solver.ny, dx, dy)
             )
             
-    plt.plot(es, label="numerical energy")
-    plt.plot(es_analytical, label="analytical")
+    tn = np.linspace(0, solver.T, nt)
+    plt.plot(tn, es, label="numerical energy")
+    plt.plot(tn, es_analytical, label="analytical")
+    plt.plot(tn, np.abs(np.array(es) - np.array(es_analytical)), label="diff")
+    #plt.yscale("log")
     plt.legend()
     plt.show()
