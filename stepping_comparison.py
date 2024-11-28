@@ -40,7 +40,8 @@ class SineGordonIntegrator:
 
         self.stepping_methods = {
                 "forward_euler": self.forward_euler_step, "leap_frog": self.leap_frog_step,
-                "stormer_verlet": self.stormer_verlet_step}
+                "stormer_verlet": self.stormer_verlet_step,
+                "alternating": self.alternating_higher_order}
 
         if stepping_method not in self.stepping_methods.keys():
             raise NotImplemented
@@ -69,7 +70,6 @@ class SineGordonIntegrator:
         return 4 * np.exp(x + Y + t) / (np.exp(2 * t) + np.exp(2 * x + 2 * Y))
  
     def lapl(self, u):
-
         def u_yy(a,):
             nx, ny = a.shape
             dy = abs(self.ymax - self.ymin) / (ny - 1)
@@ -192,6 +192,57 @@ class SineGordonIntegrator:
         return (sparse.linalg.LaplacianNd(
                 (nx, ny), boundary_conditions='neumann')).tosparse()
 
+    def alternating_higher_order(self, u, ub, v, vb, dt, t, i):
+        dx = abs(self.xmax - self.xmin) / (nx - 1)
+        dy = abs(self.ymax - self.ymin) / (ny - 1)
+        rx = self.dt / dx
+        ry = self.dt / dy
+        
+        def u_yy(a,):
+            uyy = np.zeros_like(a)
+            uyy[1:-1, 1:-1] = (a[1:-1, 2:] + a[1:-1, :-2] - 2 * a[1:-1,1:-1])/(dy ** 2)
+            return uyy
+        def u_xx(a,):
+            uxx = np.zeros_like(a)
+            uxx[1:-1, 1:-1] = (a[2:, 1:-1] + a[:-2, 1:-1] - 2 * a[1:-1,1:-1])/(dx ** 2)
+            return uxx
+        
+        u1 = 2 * (u - ub) - self.dt ** 2 * np.sin(u)
+        # apply (1 + 1/12 * delta_x²) * ((1 + 1/12 * delta_y²))
+        # ie. (Id + 1/12 L_x) * (Id + 1/12 L_y) @ u1
+        u1 = (np.ones_like(u) + 1/12 * u_xx(u1)) * (np.ones_like(u) + 1/12 * u_yy(u1))
+
+        u2 = rx ** 2 * u_xx(ub) * (np.ones_like(ub) + 1/12 * u_yy(ub)) +\
+                ry ** 2 * u_yy(ub) * (np.ones_like(ub) + 1/12 * u_xx(ub))
+        # might need to fill boundary conditions here
+        rhs = (u1 + u2).reshape(((nx + 2) * (ny + 2)))
+
+        u_n, v_n = u, v
+
+        """
+        # TODO -- build up two stencil matrices 
+        # -> can be done upon instantiating the solver object
+        # and can stay in mem without change!
+        Ax = lil_matrix((nx * ny, nx * ny)) 
+        Ay = lil_matrix((nx * ny, nx * ny))
+
+        # (need to have current boundaries instantiated!)
+        un_intermediate = spsolve(Ax, rhs)
+        un = spsolve(Ay, un_intermediate)
+
+        u_n = ub + un
+        v_n = (u_n - u) / dt
+        """
+
+        return u_n, v_n
+
+
+
+
+
+
+
+
 
     def evolve(self):
         u0 = self.initial_u(self.X, self.Y)
@@ -200,12 +251,23 @@ class SineGordonIntegrator:
         self.u[0] = u0
         self.v[0] = v0
 
+        if self.method_name == "alternating":
+            # boundary condition ĝ
+            self.u[1] = u0 + self.dt * v0 + .5 * self.dt ** 2 * (  
+                    self.lapl(v0) - np.sin(u0))
+
         i = 1
         t = 0
         tn = np.linspace(self.dt, self.T-self.dt, self.nt-1)
         for t in tqdm(tn): 
-            self.u[i], self.v[i] = self.step(
-                    self.u[i-1], self.v[i-1], self.dt, t, i) 
+            if self.method_name == "alternating":
+                self.u[i], self.v[i] = self.alternating_higher_order(
+                        self.u[i - 1], self.u[i - 2],
+                        self.v[i - 1], self.v[i - 2],
+                        self.dt, t, i)
+            else:
+                self.u[i], self.v[i] = self.step(
+                        self.u[i-1], self.v[i-1], self.dt, t, i) 
             i += 1
         self.ready = True
             
@@ -324,7 +386,22 @@ def compare_methods():
 
     
 if __name__ == '__main__':
-    compare_methods()
+    #compare_methods()
+
+    L = 7 
+    T = 30
+    nt = 1001
+    nx, ny = 130, 130
+    dt = T / nt
+    xn = yn = np.linspace(-L,L,nx+2)
+    X, Y = np.meshgrid(xn,yn)
+
+    tn = np.linspace(0, T, nt)
+    analytical_sol = np.zeros((nt, nx+2, ny+2))
+    for t in range(nt):
+        analytical_sol[t] = analytical_solution(X, Y, t) 
+    solver = SineGordonIntegrator(L, T, nt, nx, ny, "alternating")
+    solver.evolve()
 
     #L = 7 
     #T = 30

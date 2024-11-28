@@ -1,14 +1,15 @@
+import util
+
 import numpy as np
 import matplotlib.pyplot as plt
 
 from scipy.sparse import lil_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve
 
+from copy import deepcopy
 import itertools
-from typing import Dict
+from typing import Dict, Optional, Union
 import numpy.typing as npt
-
-import util
 
 
 class RBFMapper:
@@ -145,16 +146,23 @@ class RBFMapper:
     #        #x ** 2, y ** 2
     #        ])
     
-    def _build_local_domain_matrix(self, n: int, points_in_domain: npt.NDArray):
+    def _build_local_domain_matrix(self, n: int,
+            points_in_domain: Optional[Union[int, npt.NDArray]],
+            fun_to_evaluate):
         """
             n: index of point to calculate the local matrix for
         """
+        if isinstance(points_in_domain, int):
+            points_in_domain = self.points[self.m_nearest[n]]
+
         assert points_in_domain.shape[0] == self.m
 
-        order = 1
         assert 0 <= n < self.n
         local_distances = self.m_neighbors_distances[n] 
         local_points    = self.points[self.m_nearest[n]]
+
+        # hardcoding this -- we want the identity
+        diffs = np.asarray([[0, 0], [0, 0]], dtype=int)
 
         assert self.m == len(local_points)
         m = self.m
@@ -162,7 +170,7 @@ class RBFMapper:
         points_diffs = local_points[:, np.newaxis, :] - local_points[np.newaxis, :, :] 
         # L2-norm for distances
         points_dists = np.sqrt(np.sum(points_diffs ** 2, axis=-1))
-,
+
         Phi_mm = self.Phi(points_dists)
 
         def _max_poly_order(size, dim):
@@ -174,17 +182,22 @@ class RBFMapper:
         # 2d space here assumed
         max_order = _max_poly_order(self.m, 2)
 
+        order = diffs.sum(axis=1).max()
+        order = min(order, max_order)
+
         ndim = self.m
         power = util.monomial_powers(order, ndim)
         P_ms = util.mvmonos(local_points, power)
-
+       
         mat = np.block([
                 [Phi_mm, P_ms],
-                [P_ms.T, np.zeros(P_ms.shape[0], P_ms.shape[0])]
+                [P_ms.T, np.zeros((P_ms.shape[1], P_ms.shape[1]))]
                 ])
 
-        rhs = np.concatenate([points_in_domain, np.zeros(P_ms.shape[0])]) 
-        return np.linalg.solve(mat, rhs)[P_ms.shape[0]]
+        
+        #rhs = np.concatenate([points_in_domain, np.zeros(P_ms.shape[1])]) 
+        rhs = np.hstack([fun_to_evaluate(points_in_domain), np.zeros(P_ms.shape[1])])
+        return np.linalg.solve(mat, rhs)
 
     def weights(self, base_points, eval_points, diffs,):
         pass
@@ -212,9 +225,13 @@ class RBFMapper:
         #    local_i = 
  
         
+def const_fun(x):
+    assert x.shape[1] == 2 
+    const = 10
+    return const * np.ones(x.shape[0])
 
 if __name__ == '__main__':
-    plotting = True
+    plotting = False
     L = 7.
     nx = ny = 32
     xmin = ymin= -L
@@ -233,6 +250,5 @@ if __name__ == '__main__':
    
     #print(mapper.local_system(1, np.array([1, 0, 0, 0, 0]))) 
 
-    print(mapper._build_local_domain_matrix(1))
-
+    #print(mapper._build_local_domain_matrix(1, 1, const_fun))
     
