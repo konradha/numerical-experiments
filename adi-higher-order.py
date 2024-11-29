@@ -19,7 +19,6 @@ def compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, f, g, g_t, h1, h2, h3, h
     U = np.zeros((Nt+1, Nx+2, Ny+2))
     
     X, Y = np.meshgrid(np.linspace(-Lx, Lx, Nx + 2), np.linspace(-Ly, Ly, Ny + 2))
-    # Initial conditions
     U[0] = g(X, Y)
 
     def apply_boundary_condition(u, t):
@@ -50,10 +49,10 @@ def compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, f, g, g_t, h1, h2, h3, h
     #plt.show()
     
     # Boundary conditions
-    U[2:, 0, :]  = h1(y, t[2:, None])
-    U[2:, -1, :] = h2(y, t[2:, None])
-    U[2:, :, 0]  = h3(x, t[2:, None])
-    U[2:, :, -1] = h4(x, t[2:, None])
+    U[1:, 0,  :] = h1(y, t[1:, None])
+    U[1:, -1, :] = h2(y, t[1:, None])
+    U[1:, :,  0] = h3(x, t[1:, None])
+    U[1:, :, -1] = h4(x, t[1:, None])
     
 
     from scipy.sparse import eye
@@ -110,10 +109,10 @@ if __name__ == '__main__':
     Nx = Ny = 51
     L = 7.
     Lx = Ly = L
-    T = 10.
+    T = .5
     rho = 0
 
-    dt = 1e-1
+    dt = 1e-3
     Nt = int(T / dt)
 
     def u0(x, y):
@@ -142,9 +141,10 @@ if __name__ == '__main__':
 
     X, Y = np.meshgrid(np.linspace(-Lx, Lx, Nx + 2), np.linspace(-Ly, Ly, Ny + 2))
     U = compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, np.sin, u0, v0, h1, h2, h3, h4)
-    for i in range(0, Nt, 1):
+    for i in range(0, Nt, 100):
         fig, axs = plt.subplots(figsize=(20, 20),nrows=1, ncols=1,
                             subplot_kw={"projection":'3d'})
         l = 1
         axs.plot_surface(X[l:-l, l:-l], Y[l:-l, l:-l], U[i, l:-l, l:-l], cmap='viridis')
+        #axs.plot_surface(X, Y, U[i,:,:], cmap='viridis')
         plt.show()
