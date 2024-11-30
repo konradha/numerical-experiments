@@ -22,16 +22,20 @@ def compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, f, g, g_t, h1, h2, h3, h
     U[0] = g(X, Y)
 
     def apply_boundary_condition(u, t):
+        # paper suggest to only apply the x-boundary operator for \Delta U *
         u[0, 1:-1]  = u[1, 1:-1]  - hx * h1(Y[0,  1:-1], t)
         u[-1, 1:-1] = u[-2, 1:-1] + hx * h2(Y[-1, 1:-1], t)
 
-        u[1:-1, 0]  = u[1:-1,  1] - hy * h3(X[1:-1,  0], t)
-        u[1:-1, -1] = u[1:-1, -2] + hy * h4(X[1:-1, -1], t)
+        u[:, 0]  = u[:,  1] - hy * h3(X[:,  0], t)
+        u[:, -1] = u[:, -2] + hy * h4(X[:, -1], t)
 
-        u[0,  0] = .5 * (u[0, 1] + u[1,  0])
-        u[-1 ,0] = .5 * (u[-2,0] + u[-1,-2])
-        u[0, -1] = .5 * (u[0,-2] + u[-2,-1])
-        u[-1,-1] = .5 * (u[-2,-1]+ u[-1,-2])
+        #u[1:-1, 0]  = u[1:-1,  1] - hy * h3(X[1:-1,  0], t)
+        #u[1:-1, -1] = u[1:-1, -2] + hy * h4(X[1:-1, -1], t)
+
+        #u[0,  0] = .5 * (u[0, 1] + u[1,  0])
+        #u[-1 ,0] = .5 * (u[-2,0] + u[-1,-2])
+        #u[0, -1] = .5 * (u[0,-2] + u[-2,-1])
+        #u[-1,-1] = .5 * (u[-2,-1]+ u[-1,-2])
 
 
     U[1, 1:-1, 1:-1] = (U[0, 1:-1, 1:-1] + dt * g_t(X, Y)[1:-1, 1:-1]) +\
@@ -51,8 +55,20 @@ def compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, f, g, g_t, h1, h2, h3, h
     # Boundary conditions
     U[1:, 0,  :] = h1(y, t[1:, None])
     U[1:, -1, :] = h2(y, t[1:, None])
-    U[1:, :,  0] = h3(x, t[1:, None])
-    U[1:, :, -1] = h4(x, t[1:, None])
+
+    # paper suggest boundary condition to be only applicable to x-boundary
+    U[1:, 1:-1,  0] = h3(x[1:-1], t[1:, None])
+    U[1:, 1:-1, -1] = h4(x[1:-1], t[1:, None])
+
+    #fig, axs = plt.subplots(figsize=(20, 20),nrows=2, ncols=2,)
+    #for i, h in enumerate([h1, h2, h3, h4]):
+    #    x_idx = i // 2 
+    #    y_idx = i % 2
+    #    axs[x_idx][y_idx].plot(
+    #            np.linspace(-Lx, Lx, Nx + 2),
+    #            h(np.linspace(-Lx, Lx, Nx + 2), 0)
+    #            )
+    #plt.show()
     
 
     from scipy.sparse import eye
@@ -62,15 +78,16 @@ def compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, f, g, g_t, h1, h2, h3, h
         dx = 1 / nx
         main_diag = -2 * np.ones(nx)
         off_diag = np.ones(nx-1)
-        Lx = diags([off_diag, main_diag, off_diag], [-1, 0, 1], shape=(nx, nx)) / (dx**2)
+        Lx = diags([off_diag, main_diag, off_diag], [-1, 0, 1], shape=(nx, nx))
         return kron(eye(ny), Lx)
 
     def u_yy_stencil(nx, ny):
         dy = 1 / ny
         main_diag = -2 * np.ones(ny)
         off_diag = np.ones(ny-1)
-        Ly = diags([off_diag, main_diag, off_diag], [-1, 0, 1], shape=(ny, ny)) / (dy**2)
-        return kron(eye(nx), Ly)
+        Ly = diags([off_diag, main_diag, off_diag], [-1, 0, 1], shape=(ny, ny))
+        return kron(Ly, eye(nx))
+
  
     Ax = u_xx_stencil(Nx, Ny)
     Ay = u_yy_stencil(Nx, Ny)
@@ -92,9 +109,8 @@ def compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, f, g, g_t, h1, h2, h3, h
 
         F = f(U[n-1, 1:-1, 1:-1]).reshape(Nx * Ny)
 
-        f1 = 1/(1 + .5 * rho * dt) * A1 @ (
-                2 * (ub - ubb) - dt ** 2 * F
-                )
+        f1 =  A1 @ (2 * (ub - ubb) - dt ** 2 * F)
+
         f2 = (A2 + A3) @ ub 
 
         rhs = f1 + f2 
@@ -109,11 +125,14 @@ if __name__ == '__main__':
     Nx = Ny = 51
     L = 7.
     Lx = Ly = L
-    T = .5
+    T = 5.
     rho = 0
 
-    dt = 1e-3
+    dt = 1e-2
     Nt = int(T / dt)
+
+    def analytical(x, y, t):
+        return 4 * np.arctan(np.exp(x + y - t))
 
     def u0(x, y):
         return 4 * np.arctan(np.exp(x + y))
@@ -139,12 +158,27 @@ if __name__ == '__main__':
     def h4(x, t):
         return u_t_y(x, -Ly * np.ones_like(x), t)
 
+    fig, axs = plt.subplots(figsize=(20, 20),nrows=2, ncols=2,)
+    for i, h in enumerate([h1, h2, h3, h4]):
+        x_idx = i // 2 
+        y_idx = i % 2
+        axs[x_idx][y_idx].plot(np.linspace(-Lx, Lx, Nx + 2), h(np.linspace(-Lx, Lx, Nx + 2), 0))
+    plt.show()
+
     X, Y = np.meshgrid(np.linspace(-Lx, Lx, Nx + 2), np.linspace(-Ly, Ly, Ny + 2))
     U = compact_adi_sine_gordon(Nx, Ny, Nt, Lx, Ly, T, rho, np.sin, u0, v0, h1, h2, h3, h4)
-    for i in range(0, Nt, 100):
+    for i in range(0, Nt, 5):
         fig, axs = plt.subplots(figsize=(20, 20),nrows=1, ncols=1,
                             subplot_kw={"projection":'3d'})
         l = 1
-        axs.plot_surface(X[l:-l, l:-l], Y[l:-l, l:-l], U[i, l:-l, l:-l], cmap='viridis')
-        #axs.plot_surface(X, Y, U[i,:,:], cmap='viridis')
+        axs.plot_surface(X[l:-l, l:-l], Y[l:-l, l:-l],
+                np.abs(analytical(X[l:-l, l:-l], Y[l:-l, l:-l], i * dt) - U[i, l:-l, l:-l]),
+                cmap='viridis')
+        fig.suptitle(f"residual at timestep {i} = {i * dt}")
+
+        #axs.plot_surface(X[l:-l, l:-l], Y[l:-l, l:-l],
+        #        (U[i, l:-l, l:-l]),
+        #        cmap='viridis')
+        #fig.suptitle(f"numerical solution at timestep {i} = {i * dt}")
+       
         plt.show()
