@@ -143,7 +143,7 @@ points_y_boundary = np.nonzero(points_y_boundary_mask)[0]
 
 A1 = weight_matrix(
         x = nodes[groups['interior']],
-        p = nodes[groups['interior']],
+        p = nodes,
         diffs = [(2, 0), (0, 2)], # Laplacian
         n = m,
         ) 
@@ -151,7 +151,7 @@ A1 = weight_matrix(
 Ax = weight_matrix(
         x = nodes[groups['boundary:x']],
         # x-boundary
-        p = nodes[groups['boundary:x']],
+        p = nodes,
         diffs = (1, 0), # d_x
         n = 2,
         )
@@ -159,26 +159,19 @@ Ax = weight_matrix(
 Ay = weight_matrix(
         x = nodes[groups['boundary:y']],
         # y-boundary
-        p = nodes[groups['boundary:y']],
+        p = nodes,
         diffs = (0, 1), # d_y
         n = 2,
         ) 
 
-A1    = expand_cols(A1, groups['interior'],   N)
-Ax    = expand_cols(Ax, groups['boundary:x'], N)
-Ay    = expand_cols(Ay, groups['boundary:y'], N)
+#A1    = expand_cols(A1, groups['interior'],   N)
+#Ax    = expand_cols(Ax, groups['boundary:x'], N)
+#Ay    = expand_cols(Ay, groups['boundary:y'], N)
 
 
-A1 = A1.todense()
-
-A1[np.abs(A1) < 1e-7] = 0.0
-
-for i in range(A1.shape[0]):
-    print(A1[i])
-
-#A1    = expand_rows(A1, groups['interior'],   N)
-#Ax    = expand_rows(Ax, groups['boundary:x'], N)
-#Ay    = expand_rows(Ay, groups['boundary:y'], N)
+A1    = expand_rows(A1, groups['interior'],   N)
+Ax    = expand_rows(Ax, groups['boundary:x'], N)
+Ay    = expand_rows(Ay, groups['boundary:y'], N)
 
 print(A1.shape, Ax.shape, Ay.shape)
 
@@ -197,10 +190,9 @@ print(A1.shape, Ax.shape, Ay.shape)
 #    print(f"Ay Zero {s}:", zero_rows_Ay)
 
 
-#A = A1 + Ax + Ay
-#
-#
-#u_sol = spsolve(A, u_start)
+A = A1 + Ax + Ay
+
+u_sol = spsolve(A, u_start)
 
 #fig, axs = plt.subplots(figsize=(20, 20), nrows=1, ncols=1,)
 #axs.scatter(nodes[:, 0], nodes[:, 1], c=u_sol, cmap='viridis')
