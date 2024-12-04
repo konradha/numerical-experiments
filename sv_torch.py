@@ -12,6 +12,8 @@ class SineGordonIntegrator:
         self.dt = T / (nt - 1)
         self.nx = nx + 2
         self.ny = ny + 2
+
+        self.tn = torch.linspace(0, T, nt)
         
         xn = torch.linspace(-L, L, self.nx, device=self.device)
         yn = torch.linspace(-L, L, self.ny, device=self.device)
@@ -41,24 +43,24 @@ class SineGordonIntegrator:
         #omega = .1
         #return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
 
-        # periodic lattice solitons
-        m = 25
-        n = m // 2
-        L = self.L / m ** 2 
-        u = 0
-        for i in range(m):
-            for j in range(n):
-                u += torch.arctan(torch.exp(x - n * L))
-        for i in range(m):
-            for j in range(n):
-                u += torch.arctan(torch.exp(y - m * L))
-        return u
+        ## periodic lattice solitons
+        #m = 25
+        #n = m // 2
+        #L = self.L / m ** 2 
+        #u = 0
+        #for i in range(m):
+        #    for j in range(n):
+        #        u += torch.arctan(torch.exp(x - n * L))
+        #for i in range(m):
+        #    for j in range(n):
+        #        u += torch.arctan(torch.exp(y - m * L))
+        #return u
 
-        ## ring soliton
-        #R = 3.
-        ## stability assertion
-        #assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
-        #return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+        # ring soliton
+        R = 1.001
+        # stability assertion
+        assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
+        return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
         ## method to construct other ring solitons?
         #R = 1.5
@@ -154,13 +156,14 @@ class SineGordonIntegrator:
                 self.u[i-1], self.v[i-1], self.dt, t, i)
 
 def calculate_energy(u, v, nx, ny, dx, dy):
-    ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2*dx)
-    uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (2*dy)
+    f = 2
+    ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (f * dx)
+    uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (f * dy)
     ut = v[1:-1, 1:-1]
-    ux2 = ux**2
-    uy2 = uy**2
-    ut2 = ut**2
-    cos = 2*(1 - np.cos(u[1:-1, 1:-1]))
+    ux2 = ux ** 2
+    uy2 = uy ** 2
+    ut2 = ut ** 2
+    cos = 2 * (1 - np.cos(u[1:-1, 1:-1]))
     integrand = np.sum(ux2 + uy2 + ut2 + cos)
     # simple trapeziodal rule
     return 0.5 * integrand * dx * dy
@@ -169,22 +172,21 @@ def topological_charge(u, dx):
     u_x = np.zeros_like(u)
     u_x[:, 1:-1] = (u[:, 2:] - u[:, :-2]) / (2 * dx)
     topological_charge = (1 / (2 * np.pi)) * u_x[:, 1] * dx
-    # we return a "per-lane" topological charge
     return np.sum(topological_charge)
-
-
 
 if __name__ == '__main__':
     from matplotlib.animation import FuncAnimation
     from mpl_toolkits.mplot3d import Axes3D
+    from sys import argv
 
-    L, T, nt, nx, ny, device = 7, 15, 101, 64, 64, 'cpu'
+    L, T, nt, nx, ny, device = 10, 150, 1001, 64, 64, 'cpu'
     solver = SineGordonIntegrator(L, T, nt, nx, ny, device)
     solver.evolve()
     X, Y = solver.X, solver.Y
     data = solver.u.detach().numpy() 
-    animate = False
-
+    assert len(argv) > 1
+    animate = argv[1].lower() == 'true' or int(argv[1].lower()) == 1  
+    
     if animate:
         fig = plt.figure(figsize=(20, 20))
         ax = fig.add_subplot(111, projection='3d')
@@ -192,7 +194,7 @@ if __name__ == '__main__':
 
         def update(frame):
             ax.clear()
-            ax.plot_surface(X, Y, data[frame], cmap='viridis')
+            ax.plot_surface(X, Y, (data[frame]), cmap='viridis')
         fps = 300
         ani = FuncAnimation(fig, update, frames=solver.nt, interval=solver.nt / fps, )
         plt.show()
@@ -209,6 +211,9 @@ if __name__ == '__main__':
                 calculate_energy(u, v, nx, ny, dx, dy)
                 )
         plt.plot(es)
+        plt.title("Energy")
+        plt.xlabel("T / [1]")
+        plt.ylabel("E / [1]")
         plt.show()
 
         tc = []
@@ -216,8 +221,9 @@ if __name__ == '__main__':
             u = data[i]
             tc.append(topological_charge(u, dx))
               
-        plt.plot(tc)
-        #for i in range(nx):
-        #    plt.plot(tc[i])
+        plt.plot(solver.tn, tc,)
+        plt.title("Topological Charge")
+        plt.xlabel("T / [1]")
+        plt.ylabel("")
         plt.show()
         
