@@ -38,7 +38,7 @@ def f(x, y):
     #omega = .95
     #return 4 * np.arctan(np.sin(omega * x) / np.cosh(omega * y))
 
-    #return 4 * np.arctan(np.exp(x + y))
+    return 4 * np.arctan(np.exp(x + y))
 
     ### "circular" elliptic Jacobi function -- easily yields instabilities!
     #from scipy.special import ellipj
@@ -47,11 +47,11 @@ def f(x, y):
     #sn, cn, dn, ph = ellipj(u, m)
     #return np.array(sn)
 
-    # ring soliton
-    R = 1.001
-    # stability assertion
-    assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
-    return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+    ## ring soliton
+    #R = 1.001
+    ## stability assertion
+    #assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
+    #return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
 
 

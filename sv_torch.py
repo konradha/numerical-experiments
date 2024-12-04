@@ -30,8 +30,8 @@ class SineGordonIntegrator:
         # single soliton solutions: need velocity boundary conditions
         # to yield coherent energy / topological charge
 
-        ## single soliton -- this has an issue with the von neumann boundary condition!
-        #return 4 * torch.arctan(torch.exp(x + y))
+        # single soliton -- this has an issue with the von neumann boundary condition!
+        return 4 * torch.arctan(torch.exp(x + y))
 
         ## single antisoliton -- this has an issue with the von neumann boundary condition!
         #return 4 * torch.arctan(torch.exp(-(x + y) / .2))
@@ -56,11 +56,11 @@ class SineGordonIntegrator:
         #        u += torch.arctan(torch.exp(y - m * L))
         #return u
 
-        # ring soliton
-        R = 1.001
-        # stability assertion
-        assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
-        return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+        ## ring soliton
+        #R = 1.001
+        ## stability assertion
+        #assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
+        #return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
         ## method to construct other ring solitons?
         #R = 1.5

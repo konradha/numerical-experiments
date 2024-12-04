@@ -2,17 +2,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 def energy(u, v, nx, ny, dx, dy):
-    f = 2
-    ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (f * dx)
-    uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (f * dy)
+    ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * dx)
+    uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (2. * dy)
     ut = v[1:-1, 1:-1]
     ux2 = ux ** 2
     uy2 = uy ** 2
     ut2 = ut ** 2
     cos = 2 * (1 - np.cos(u[1:-1, 1:-1]))
-    integrand = np.sum(ux2 + uy2 + ut2 + cos)
-    # simple trapeziodal rule
-    return 0.5 * integrand * dx * dy
+    integrand = ux2 + uy2 + ut2 + cos
+    # trapezoidal rule
+    return np.sum(0.5 * integrand * dx * dy)
+
+def topological_charge(u, dx):
+    u_x = np.zeros_like(u)
+    u_x[:, 1:-1] = (u[:, 2:] - u[:, :-2]) / (2 * dx)
+    topological_charge = (1 / (2 * np.pi)) * u_x[:, 1] * dx
+    return np.sum(topological_charge)
 
 if __name__ == '__main__':
     from matplotlib.animation import FuncAnimation
@@ -21,6 +26,8 @@ if __name__ == '__main__':
     f1 = "rbf-testdata.npy"
     f2 = "sv-test-data.npy"
 
+    # this data now only has internal points
+    # (no ghost points as needed in Stormer-Verlet FD method)
     rbf_data = np.load(f1)
     stv_data = np.load(f2)
 
@@ -57,6 +64,7 @@ if __name__ == '__main__':
     plt.show()
 
     es_rbf, es_stv = [], []
+    tc_rbf, tc_stv = [], []
     for i in range(nt):
         t = dt * i
         es_rbf.append(
@@ -65,11 +73,29 @@ if __name__ == '__main__':
         es_stv.append(
                 energy(stv_data[i], stv_data_v[i], nx, ny, dx, dy)
                 )
-    plt.plot(tn, es_rbf, label="RBF")
-    plt.plot(tn, es_stv, label="Stormer-Verlet")
-    plt.ylabel("E / 1")
-    plt.xlabel("T / 1")
-    plt.legend()
+
+        tc_rbf.append(
+                topological_charge(rbf_data[i], dx)
+                )
+        tc_stv.append(
+                topological_charge(stv_data[i], dx)
+                )
+
+    fig, axs = plt.subplots(figsize=(20, 20), ncols=2,)
+    [ax0, ax1] = axs 
+
+    ax0.plot(tn, es_rbf, label="RBF")
+    ax0.plot(tn, es_stv, label="Stormer-Verlet")
+    ax0.set_ylabel("E / 1")
+    ax0.set_xlabel("T / 1")
+    ax0.legend()
+    ax0.set_title("Energy over time")
+
+    ax1.plot(tn, tc_rbf, label="RBF")
+    ax1.plot(tn, tc_stv, label="Stormer-Verlet")
+    ax1.set_ylabel("TC / 1")
+    ax1.set_xlabel("T / 1")
+    ax1.legend()
+    ax1.set_title("Topological charge over time")
+
     plt.show()
-
-
