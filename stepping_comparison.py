@@ -17,7 +17,7 @@ def calculate_energy(u, v, nx, ny, dx, dy):
     return 0.5 * integrand * dx * dy
 
 class SineGordonIntegrator:
-    def __init__(self, L, T, nt, nx, ny, stepping_method="stormer_verlet"):
+    def __init__(self, L, T, nt, nx, ny, stepping_method="stormer_verlet", test_problem=False):
         self.L = L
         self.T = T
         self.nt = nt
@@ -49,6 +49,7 @@ class SineGordonIntegrator:
             self.step = self.stepping_methods[stepping_method]
             self.method_name = stepping_method
         self.ready = False
+        self.test_problem = test_problem
 
 
     @staticmethod
@@ -58,6 +59,68 @@ class SineGordonIntegrator:
     @staticmethod
     def initial_v(x, y):
         return -4 * np.exp(x + y) / (1 + np.exp(2 * x + 2 * y)) 
+
+    def initial_u_grf(self, x, y):
+        #sig = np.sin(np.random.rand(self.nx, self.ny))
+        #mean = np.zeros(sig.shape[0])
+        #f = np.random.multivariate_normal(mean, sig)
+        #return f 
+
+        #return np.exp(-(x ** 2 + y ** 2))
+
+        #return 4 * np.arctan(
+        #        np.exp(x)) + 4 * np.arctan(np.exp(y))
+
+        #s = 1.5
+        #r = 2.
+
+        #d1 = (x - s) ** 2 + (y - s) ** 2  
+        #d2 = (x + s) ** 2 + (y + s) ** 2
+
+        #m1 = d1 <= r ** 2 
+        #m2 = d2 <= r ** 2
+
+        #vals = np.zeros_like(x)
+        #vals[m1] = -np.exp(-(x[m1] ** 2 + y[m1] ** 2))
+        #vals[m2] =  np.exp(-(x[m2] ** 2 + y[m2] ** 2))
+        #return np.arctan(vals)
+
+        ## single soliton
+        #return 4 * np.arctan(np.exp(x + y))
+
+        ## soliton-antisoliton
+        #return 4 * np.arctan(np.exp(y)) - 4 * np.arctan(np.exp(x))
+
+        # "static breather-like"
+        omega = 1.6
+        return 4 * np.arctan(np.sin(omega * x) / np.cosh(omega * y))
+
+
+        ## periodic lattice solitons
+        #m = 15
+        #n = m // 2
+        #L = self.L / m
+        #u = 0
+        #for i in range(m):
+        #    for j in range(n):
+        #        u += np.arctan(np.exp(x - n * L)) 
+        #for i in range(m):
+        #    for j in range(n):
+        #        u += np.arctan(np.exp(y - m * L)) 
+        #return 4 * u
+
+        ## ring soliton
+        #R = 1.5
+        #return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+
+        #from scipy.special import ellipj
+        #m = 0.5
+        #u = (X + Y) / (X ** 2 + Y ** 2)
+        #sn, cn, dn, ph = ellipj(u, m)
+        #return sn
+        
+        
+        
 
     @staticmethod
     def boundary_x(X, y, t):
@@ -88,8 +151,8 @@ class SineGordonIntegrator:
         return u_xx(u) + u_yy(u)
 
     def apply_boundary_condition(self, u, v, t):
-        dx = abs(self.xmax - self.xmin) / (self.nx - 1)
-        dy = abs(self.ymax - self.ymin) / (self.ny - 1)
+        dx = abs(self.xmax - self.xmin) / (self.nx - 2)
+        dy = abs(self.ymax - self.ymin) / (self.ny - 2)
         dt = self.dt
 
         # u's ghost cells get approximation following boundary condition
@@ -113,6 +176,24 @@ class SineGordonIntegrator:
         v[-1, 1:-1] = self.boundary_x(self.xmax, self.yn[1:-1], t)
         v[1:-1, 0] = self.boundary_y(self.xn[1:-1], self.ymin, t)
         v[1:-1, -1] = self.boundary_y(self.xn[1:-1], self.ymax, t)
+
+    def apply_neumann_boundary(self, u, v):
+        u[0, 1:-1] = u[1, 1:-1]
+        u[-1, 1:-1] = u[-2, 1:-1]
+        
+        u[1:-1, 0] = u[1:-1, 1]
+        u[1:-1, -1] = u[1:-1, -2]
+        
+        u[0, 0] = (u[1, 0] + u[0, 1])/2
+        u[-1, 0] = (u[-2, 0] + u[-1, 1])/2
+        u[0, -1] = (u[1, -1] + u[0, -2])/2
+        u[-1, -1] = (u[-2, -1] + u[-1, -2])/2
+         
+        v[0, 1:-1]  = 0
+        v[-1, 1:-1] = 0
+        v[1:-1, 0]  = 0
+        v[1:-1, -1] = 0
+
  
     def forward_euler_step(self, u, v, dt, t, i):
         u_n = u + dt * v
@@ -131,16 +212,29 @@ class SineGordonIntegrator:
         return u_n, v_n
         
     def stormer_verlet_step(self, u, v, dt, t, i):
-        if i == 1:
+        def f(x):
+            #return np.sin(u)
+            return x + x ** 3
+
+        if i == 1 and self.test_problem:
             u_n = u + dt * v
             v = analytical_velocity(self.X, self.Y, dt)
             return u_n, v
+        
+        elif i == 1:
+            v = np.zeros_like(u)
+            u_n = u + dt * v  + .5 * dt ** 2 * (self.lapl(u) - f(u))
+            return u_n, v
 
-        op = self.lapl(u) - np.sin(u)
+
+        op = self.lapl(u) - f(u)
         u_n = 2 * self.u[i - 1] - self.u[i - 2] + op * dt ** 2
         # we don't need the velocity for the störmer-verlet method
         v_n = (u_n - self.u[i - 1]) / dt
-        self.apply_boundary_condition(u_n, v_n, t)
+        if self.test_problem:
+            self.apply_boundary_condition(u_n, v_n, t)
+        else:
+            self.apply_neumann_boundary(u_n, v_n)
         return u_n, v_n 
         
 
@@ -241,12 +335,14 @@ class SineGordonIntegrator:
 
 
 
-
-
-
     def evolve(self):
-        u0 = self.initial_u(self.X, self.Y)
-        v0 = self.initial_v(self.X, self.Y)
+        if self.test_problem:
+            u0 = self.initial_u(self.X, self.Y)
+            v0 = self.initial_v(self.X, self.Y)
+
+        else:
+            u0 = self.initial_u_grf(self.X, self.Y)
+            v0 = np.zeros_like(u0)
     
         self.u[0] = u0
         self.v[0] = v0
@@ -389,9 +485,9 @@ if __name__ == '__main__':
     #compare_methods()
 
     L = 7 
-    T = 30
-    nt = 1001
-    nx, ny = 130, 130
+    T = 8
+    nt = 301
+    nx, ny = 30, 30#130, 130
     dt = T / nt
     xn = yn = np.linspace(-L,L,nx+2)
     X, Y = np.meshgrid(xn,yn)
@@ -400,7 +496,7 @@ if __name__ == '__main__':
     analytical_sol = np.zeros((nt, nx+2, ny+2))
     for t in range(nt):
         analytical_sol[t] = analytical_solution(X, Y, t) 
-    solver = SineGordonIntegrator(L, T, nt, nx, ny, "alternating")
+    solver = SineGordonIntegrator(L, T, nt, nx, ny, test_problem=False)
     solver.evolve()
 
     #L = 7 
@@ -410,9 +506,9 @@ if __name__ == '__main__':
     #nx, ny = 130, 130
     #solver = SineGordonIntegrator(L, T, nt, nx, ny)
     #solver.evolve()
-    #
+    
     #compare_energy(solver)
-    #
+    
     #for t in (range(0, solver.nt, solver.nt//10)): 
     #    plot_comparison_at_t(solver, t)
     #    #ti = solver.dt * t
@@ -493,6 +589,25 @@ if __name__ == '__main__':
     #    #axs[3].plot(solver.xn, solver.u[t][:,-1],)
     #    #axs[3].plot(solver.xn, solver.u[t][:,-2],)
     #    #plt.show()
-    # 
-    #
-    #
+     
+    
+    from matplotlib.animation import FuncAnimation
+    from mpl_toolkits.mplot3d import Axes3D
+    fig = plt.figure(figsize=(20, 20))
+    ax = fig.add_subplot(111, projection='3d')
+    data = solver.u
+     
+    X, Y = solver.X, solver.Y
+    #zmin, zmax = np.min(data), np.max(data)
+    #surf = ax.plot_surface(X, Y, data[0], cmap='viridis', vmin=zmin, vmax=zmax)
+    surf = ax.plot_surface(X, Y, data[0], cmap='viridis',) 
+    def update(frame):
+        ax.clear()  # Clear the axis for the next frame
+        #ax.set_zlim(np.min(data), np.max(data))
+        ax.plot_surface(X, Y, data[frame], cmap='viridis')   
+
+    fps = 30
+    ani = FuncAnimation(fig, update, frames=solver.nt, interval=solver.nt / fps, )
+   
+    ani.save("kg-static-breather-like-large-omega.gif")
+    

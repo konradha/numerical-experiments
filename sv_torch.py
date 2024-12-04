@@ -9,7 +9,7 @@ class SineGordonIntegrator:
         self.L = L
         self.T = T
         self.nt = nt
-        self.dt = T / (nt - 1)
+        self.dt = T / nt
         self.nx = nx + 2
         self.ny = ny + 2
 
@@ -179,7 +179,7 @@ if __name__ == '__main__':
     from mpl_toolkits.mplot3d import Axes3D
     from sys import argv
 
-    L, T, nt, nx, ny, device = 10, 150, 1001, 64, 64, 'cpu'
+    L, T, nt, nx, ny, device = 5., 10., 400, 36, 36, 'cpu'
     solver = SineGordonIntegrator(L, T, nt, nx, ny, device)
     solver.evolve()
     X, Y = solver.X, solver.Y
@@ -203,10 +203,12 @@ if __name__ == '__main__':
 
     else:
         es = []
+        vs = []
         dx = dy = 2 * L / nx
         for i in range(1, solver.nt):
             u = data[i]
             v = (data[i] - data[i - 1]) / (solver.dt)
+            vs.append(v)
             es.append(
                 calculate_energy(u, v, nx, ny, dx, dy)
                 )
@@ -226,4 +228,9 @@ if __name__ == '__main__':
         plt.xlabel("T / [1]")
         plt.ylabel("")
         plt.show()
+        vs = np.array(vs)
         
+
+    with open('sv-test-data.npy', 'wb') as f:
+        np.save(f, data[:, 1:-1, 1:-1])
+        np.save(f, vs[:, 1:-1, 1:-1])

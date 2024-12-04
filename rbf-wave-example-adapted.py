@@ -54,6 +54,8 @@ def f(x, y):
     return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
 
+
+
 def g(x, y):
     return np.zeros_like(x)
 
@@ -150,10 +152,14 @@ data = un
 es = []
 nx = ny = N
 dx = dy = 2 * L / N
+u_solutions = []
+v_solutions = []
 for i, t in enumerate(tn):
     u, v = data[:, i].reshape((2, -1)) 
     u = I.dot(u).reshape((nx, ny))
     v = I.dot(v).reshape((nx, ny))
+    u_solutions.append(u)
+    v_solutions.append(v)
 
     #fig, ax = plt.subplots(figsize=(20, 20), ncols=2, subplot_kw={"projection":'3d'}) 
     #ax[0].plot_surface(xgrid, ygrid, u, cmap='viridis')
@@ -174,6 +180,7 @@ u, v = un[:, 0].reshape((2, -1))
 u_xy = I.dot(u).reshape((N, N))
 surf = ax.plot_surface(xgrid, ygrid, u_xy, cmap='viridis',)
 
+
 def update(frame):
     u, v = un[:, frame].reshape((2, -1))
     u_xy = I.dot(u).reshape((N, N))
@@ -183,3 +190,10 @@ def update(frame):
 fps = 30
 ani = FuncAnimation(fig, update, frames=Nt, interval= Nt / fps,)
 plt.show()
+
+
+u_solutions = np.array(u_solutions)
+v_solutions = np.array(v_solutions)
+with open('rbf-testdata.npy', 'wb') as f:
+    np.save(f, u_solutions)
+    np.save(f, v_solutions)
