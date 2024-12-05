@@ -30,8 +30,8 @@ class SineGordonIntegrator:
         # single soliton solutions: need velocity boundary conditions
         # to yield coherent energy / topological charge
 
-        # single soliton -- this has an issue with the von neumann boundary condition!
-        return 4 * torch.arctan(torch.exp(x + y))
+        ## single soliton -- this has an issue with the von neumann boundary condition!
+        #return 4 * torch.arctan(torch.exp(x + y))
 
         ## single antisoliton -- this has an issue with the von neumann boundary condition!
         #return 4 * torch.arctan(torch.exp(-(x + y) / .2))
@@ -56,11 +56,11 @@ class SineGordonIntegrator:
         #        u += torch.arctan(torch.exp(y - m * L))
         #return u
 
-        ## ring soliton
-        #R = 1.001
-        ## stability assertion
-        #assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
-        #return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+        # ring soliton
+        R = 1.001
+        # stability assertion
+        assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
+        return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
         ## method to construct other ring solitons?
         #R = 1.5
@@ -117,6 +117,7 @@ class SineGordonIntegrator:
             ## Klein-Gordon
             #return x + x ** 3
 
+        # first step needs special treatment as we cannot yet use the pre-preceding
         if i == 1:
             v = torch.zeros_like(u)
             u_n = u + dt * v + 0.5 * dt ** 2 * (self.lapl(u) - f(u))
@@ -135,9 +136,7 @@ class SineGordonIntegrator:
         u[-1, 1:-1] = u[-2, 1:-1]
         u[:,  0]    = u[:, 1]
         u[:, -1]    = u[:, -2]
-
-     
-        
+ 
         v[0, 1:-1] = 0
         v[-1, 1:-1] = 0
         v[1:-1, 0] = 0
@@ -150,8 +149,8 @@ class SineGordonIntegrator:
         self.u[0] = u0
         self.v[0] = v0
 
-        tn = torch.linspace(self.dt, self.T-self.dt, self.nt-1, device=self.device)
-        for i, t in enumerate(tqdm(tn), 1):
+        for i, t in enumerate(tqdm(self.tn)):
+            if i == 0: continue # we already initialized u0, v0
             self.u[i], self.v[i] = self.stormer_verlet_step(
                 self.u[i-1], self.v[i-1], self.dt, t, i)
 
@@ -190,17 +189,15 @@ if __name__ == '__main__':
     if animate:
         fig = plt.figure(figsize=(20, 20))
         ax = fig.add_subplot(111, projection='3d')
-        surf = ax.plot_surface(X, Y, data[0], cmap='viridis',)
-
+        surf = ax.plot_surface(X, Y, data[-1], cmap='viridis',)
+        plt.show()
         def update(frame):
             ax.clear()
             ax.plot_surface(X, Y, (data[frame]), cmap='viridis')
         fps = 300
         ani = FuncAnimation(fig, update, frames=solver.nt, interval=solver.nt / fps, )
         plt.show()
-        #ani.save("testout.gif")
-
-
+        
     else:
         es = []
         vs = []
@@ -231,6 +228,8 @@ if __name__ == '__main__':
         vs = np.array(vs)
         
 
-    with open('sv-test-data.npy', 'wb') as f:
+    with open('sv-ring-soliton.npy', 'wb') as f:
         np.save(f, data[:, 1:-1, 1:-1])
         np.save(f, vs[:, 1:-1, 1:-1])
+    with open('sv-ring-soliton-tn.npy', 'wb') as f:
+        np.save(f, solver.tn.detach().numpy()) 

@@ -23,16 +23,31 @@ if __name__ == '__main__':
     from matplotlib.animation import FuncAnimation
     from mpl_toolkits.mplot3d import Axes3D
 
-    f1 = "rbf-testdata.npy"
-    f2 = "sv-test-data.npy"
+    f1 = "rbf-ring-soliton.npy"
+    f2 = "sv-ring-soliton.npy"
+    f1t = "rbf-ring-soliton-tn.npy"
+    f2t = "sv-ring-soliton-tn.npy"
 
     # this data now only has internal points
     # (no ghost points as needed in Stormer-Verlet FD method)
     rbf_data = np.load(f1)
     stv_data = np.load(f2)
 
+    # the initial function should be _really_ similar;
+    # currently this is not nicely done
+    #print("Initial difference", np.sum(np.abs(rbf_data[0] - stv_data[0])))
+    # assert np.sum(np.abs(rbf_data[0] - stv_data[0])) < 1. 
+
     rbf_data_v = np.load(f1)
-    stv_data_v = np.load(f2)
+    stv_data_v = np.load(f2)    
+
+    rbf_data_tn = np.load(f1t)
+    stv_data_tn = np.load(f2t)
+
+    # the timings aren't _exactly identical!
+    #plt.plot(np.abs(rbf_data_tn - stv_data_tn))
+    #plt.show()
+    
 
     L = 5
     nx = ny = 36
@@ -44,13 +59,42 @@ if __name__ == '__main__':
     dt = T / nt
     tn = np.linspace(0, T, nt)
 
+    # something's off about the statc breather-like solution!
+    # probably the interpolation matrix is malformed that spits out the data
+    # for the RBF stepping run
+
+    #print(np.sum(np.abs(rbf_data[0] - stv_data[0])))
+    assert stv_data_tn[0] == rbf_data_tn[0] 
+    fig, ax = plt.subplots(figsize=(20, 20), ncols=2, nrows=2, subplot_kw={"projection":'3d'})
+    for i in range(2):
+        if i == 0:
+            data = stv_data[0]
+            data_v = stv_data_v[0]
+
+        else:
+            data = rbf_data[0]
+            data_v = rbf_data_v[0]
+
+        ax[i][0].plot_surface(X, Y, data, cmap='viridis')
+        ax[i][1].plot_surface(X, Y, data_v, cmap='viridis')
+
+    plt.show()
+
+
+
     assert rbf_data.shape == (nt, nx, ny) and stv_data.shape == (nt, nx, ny)  
     
     fig, axs = plt.subplots(figsize=(20, 20), ncols=3, subplot_kw={"projection":'3d'})
     [ax0, ax1, ax2] = axs 
+    ax0.plot_surface(X, Y, rbf_data[0], cmap='viridis')
+    ax1.plot_surface(X, Y, stv_data[0], cmap='viridis')
+    ax2.plot_surface(X, Y, np.abs(rbf_data[0] - stv_data[0]), cmap='viridis')
+
+    #plt.show()
     def update(frame):
         ax0.clear()
         ax1.clear()
+        ax2.clear()
         ax0.plot_surface(X, Y, rbf_data[frame], cmap='viridis')
         ax1.plot_surface(X, Y, stv_data[frame], cmap='viridis')
         ax2.plot_surface(X, Y, np.abs(rbf_data[frame] - stv_data[frame]), cmap='viridis')

@@ -22,7 +22,7 @@ spacing = 5.e-1
 stencil_size = 35
 order = 4
 # the RBF choice might have to be changed
-phi = 'phs5'
+phi = 'gtps'
 
 nodes, groups, normals = poisson_disc_nodes(
     spacing,
@@ -35,10 +35,10 @@ groups['interior+boundary:all'] = np.hstack((groups['interior'], groups['boundar
 
 def f(x, y):
     ## "static breather-like"
-    #omega = .95
+    #omega = .1
     #return 4 * np.arctan(np.sin(omega * x) / np.cosh(omega * y))
 
-    return 4 * np.arctan(np.exp(x + y))
+    #return 4 * np.arctan(np.exp(x + y))
 
     ### "circular" elliptic Jacobi function -- easily yields instabilities!
     #from scipy.special import ellipj
@@ -47,13 +47,11 @@ def f(x, y):
     #sn, cn, dn, ph = ellipj(u, m)
     #return np.array(sn)
 
-    ## ring soliton
-    #R = 1.001
-    ## stability assertion
-    #assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
-    #return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
-
-
+    # ring soliton
+    R = 1.001
+    # stability assertion
+    assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
+    return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
 
 def g(x, y):
@@ -104,17 +102,19 @@ global_t = 0
 
 def state_derivative(t, z):
     u, v = z.reshape((2, -1)) 
-    global_t = t 
+    global_t = t  # was used as a bookkeeping var
+    
     us = Bsolver.solve(u)
     return np.hstack([v, D.dot(us) - np.sin(us)])
  
-
 print('Performing time integration...')
 soln = solve_ivp(
     fun=state_derivative,
     t_span=[times[0], times[-1]],
     y0=z_init,
-    method='RK45',
+    #method='RK45',
+    #method='Radau',
+    method='BDF',
     t_eval=times)
 print('Done')
 
@@ -179,6 +179,7 @@ ax = fig.add_subplot(111, projection='3d')
 u, v = un[:, 0].reshape((2, -1))
 u_xy = I.dot(u).reshape((N, N))
 surf = ax.plot_surface(xgrid, ygrid, u_xy, cmap='viridis',)
+#plt.show()
 
 
 def update(frame):
@@ -194,6 +195,8 @@ plt.show()
 
 u_solutions = np.array(u_solutions)
 v_solutions = np.array(v_solutions)
-with open('rbf-testdata.npy', 'wb') as f:
+with open('rbf-ring-soliton.npy', 'wb') as f:
     np.save(f, u_solutions)
     np.save(f, v_solutions)
+with open('rbf-ring-soliton-tn.npy', 'wb') as f:
+    np.save(f, tn)
