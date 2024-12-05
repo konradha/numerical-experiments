@@ -21,8 +21,8 @@ class SineGordonIntegrator:
         self.xmin, self.xmax = -L, L 
         self.ymin, self.ymax = -L, L 
 
-        self.u = torch.zeros((self.nt, self.nx, self.ny), device=self.device)
-        self.v = torch.zeros((self.nt, self.nx, self.ny), device=self.device)
+        self.u = torch.zeros((self.nt, self.nx, self.ny), device=self.device, dtype=torch.float64)
+        self.v = torch.zeros((self.nt, self.nx, self.ny), device=self.device, dtype=torch.float64)
 
         self.X, self.Y = torch.meshgrid(xn, yn, indexing='ij')
 
@@ -39,9 +39,9 @@ class SineGordonIntegrator:
         ## soliton-antisoliton
         #return 4 * torch.arctan(torch.exp(y)) - 4 * torch.arctan(torch.exp(x))
 
-        ## "static breather-like"
-        #omega = .1
-        #return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
+        # "static breather-like"
+        omega = .6
+        return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
 
         ## periodic lattice solitons
         #m = 25
@@ -56,11 +56,11 @@ class SineGordonIntegrator:
         #        u += torch.arctan(torch.exp(y - m * L))
         #return u
 
-        # ring soliton
-        R = 1.001
-        # stability assertion
-        assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
-        return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+        ## ring soliton
+        #R = 1.001
+        ## stability assertion
+        #assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
+        #return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
         ## method to construct other ring solitons?
         #R = 1.5
@@ -154,10 +154,93 @@ class SineGordonIntegrator:
             self.u[i], self.v[i] = self.stormer_verlet_step(
                 self.u[i-1], self.v[i-1], self.dt, t, i)
 
+    def evolve_ETD1(self):
+        # ETD1
+
+        def f(x):
+            # sine-Gordon
+            return -torch.sin(x)
+
+            ## Klein-Gordon
+            #return x + x ** 3
+
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+        
+        dt = self.dt
+        def build_L(): 
+            N = self.nx
+            assert self.nx == self.ny
+            dx = 2 * self.L / (self.nx - 1)
+            h2 = dx ** 2
+            i_h2 = 1 / h2
+            self.Lap = np.zeros((N, N))
+            for i in range(N):
+                self.Lap[i, i] = -4
+                if i > 0:
+                    self.Lap[i, i - 1] = 1
+                if i < N - 1:
+                    self.Lap[i, i + 1] = 1
+            self.Lap = i_h2 * (
+                            np.kron(np.eye(N), self.Lap) + np.kron(self.Lap, np.eye(N))
+                        )
+            self.Lap[0,   :] = 0
+            self.Lap[-1,  :] = 0
+            self.Lap[: ,  0] = 0
+            self.Lap[: , -1] = 0
+            self.Lap[0, 0] = self.Lap[-1, -1] = 1.
+            #self.Lap = (np.kron(np.eye(N), self.Lap) + np.kron(self.Lap, np.eye(N)))
+        
+        build_L()
+        
+        from scipy.linalg import expm
+        from numpy.linalg import cond
+        torch_lapl = torch.tensor(self.Lap, dtype=torch.float64)
+        exp_L_dt = torch.tensor(expm(self.Lap * dt), dtype=torch.float64)
+        Id = torch.eye(exp_L_dt.shape[0], dtype=torch.float64)
+        torch_lapl_inv = torch.tensor(np.linalg.inv(self.Lap), dtype=torch.float64)
+
+        nz_mask = exp_L_dt != 0.
+        assert np.abs(cond(exp_L_dt.detach().numpy())) < 1e6
+        
+        zeros = torch.zeros_like(Id) 
+        L = torch.cat([
+                            torch.cat([zeros,         Id], dim=1),
+                            torch.cat([torch_lapl, zeros], dim=1),
+                        ], dim=0)
+        L_inv = torch.cat([
+                            torch.cat([zeros, torch_lapl_inv], dim=1),
+                            torch.cat([Id,             zeros], dim=1),
+                            ], dim=0)
+        assert torch.allclose(L @ L_inv, torch.eye(L.shape[0], dtype=torch.float64))
+
+        expon = torch.tensor(
+                expm(self.dt * L.detach().numpy()),
+                dtype=torch.float64
+                )
+        propagator = L_inv @ (expon - torch.eye(expon.shape[0], dtype=torch.float64))
+ 
+        for i in tqdm(range(1, nt)):
+            u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
+
+            uv    = torch.cat([u, v], dim=0)
+            gamma = torch.cat([torch.zeros_like(u), f(u)],)
+
+            u_vec = expon @ uv + propagator @ gamma
+
+            un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+            vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+            self.apply_neumann_boundary(un, vn)
+
+            self.u[i], self.v[i] = un, vn
+            
+
 def calculate_energy(u, v, nx, ny, dx, dy):
-    f = 2
-    ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (f * dx)
-    uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (f * dy)
+    ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * dx)
+    uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (2. * dy)
     ut = v[1:-1, 1:-1]
     ux2 = ux ** 2
     uy2 = uy ** 2
@@ -181,16 +264,17 @@ if __name__ == '__main__':
     L, T, nt, nx, ny, device = 5., 10., 400, 36, 36, 'cpu'
     solver = SineGordonIntegrator(L, T, nt, nx, ny, device)
     solver.evolve()
+    #solver.evolve_ETD1()
     X, Y = solver.X, solver.Y
-    data = solver.u.detach().numpy() 
+    data = solver.u.cpu().numpy() 
+ 
     assert len(argv) > 1
     animate = argv[1].lower() == 'true' or int(argv[1].lower()) == 1  
     
     if animate:
         fig = plt.figure(figsize=(20, 20))
         ax = fig.add_subplot(111, projection='3d')
-        surf = ax.plot_surface(X, Y, data[-1], cmap='viridis',)
-        plt.show()
+        surf = ax.plot_surface(X, Y, data[0], cmap='viridis',)
         def update(frame):
             ax.clear()
             ax.plot_surface(X, Y, (data[frame]), cmap='viridis')
@@ -228,8 +312,9 @@ if __name__ == '__main__':
         vs = np.array(vs)
         
 
-    with open('sv-ring-soliton.npy', 'wb') as f:
-        np.save(f, data[:, 1:-1, 1:-1])
-        np.save(f, vs[:, 1:-1, 1:-1])
-    with open('sv-ring-soliton-tn.npy', 'wb') as f:
-        np.save(f, solver.tn.detach().numpy()) 
+        # data saved when calling without animation
+        with open('sv-ring-soliton.npy', 'wb') as f:
+            np.save(f, data[:, 1:-1, 1:-1])
+            np.save(f, vs[:, 1:-1, 1:-1])
+        with open('sv-ring-soliton-tn.npy', 'wb') as f:
+            np.save(f, solver.tn.detach().numpy()) 
