@@ -19,10 +19,10 @@ Nt = 400
 T = 10.
 times = np.linspace(0.0, T, Nt)
 spacing = 5.e-1
-stencil_size = 35
-order = 4
+stencil_size = 53 # 35
+order = 1 # 4
 # the RBF choice might have to be changed
-phi = 'gtps'
+phi = 'phs4' # 'gtps'
 
 nodes, groups, normals = poisson_disc_nodes(
     spacing,
@@ -48,9 +48,10 @@ def f(x, y):
     #return np.array(sn)
 
     # ring soliton
-    R = 1.001
+    #R = 1.001
+    R =  .5
     # stability assertion
-    assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
+    #assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
     return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
 
@@ -112,9 +113,9 @@ soln = solve_ivp(
     fun=state_derivative,
     t_span=[times[0], times[-1]],
     y0=z_init,
-    #method='RK45',
+    method='RK45',
     #method='Radau',
-    method='BDF',
+    #method='BDF',
     t_eval=times)
 print('Done')
 

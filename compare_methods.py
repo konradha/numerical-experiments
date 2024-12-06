@@ -105,6 +105,7 @@ if __name__ == '__main__':
 
     fps = 300
     ani = FuncAnimation(fig, update, frames=nt, interval=nt / fps, )
+    #ani.save("ring-soliton-comparison.gif")
     plt.show()
 
     es_rbf, es_stv = [], []

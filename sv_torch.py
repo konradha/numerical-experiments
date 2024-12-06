@@ -3,6 +3,10 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+import scipy
+from scipy.sparse import diags
+from scipy import sparse as sp
+
 class SineGordonIntegrator:
     def __init__(self, L, T, nt, nx, ny, device='cuda',):
         self.device = torch.device(device)
@@ -39,9 +43,9 @@ class SineGordonIntegrator:
         ## soliton-antisoliton
         #return 4 * torch.arctan(torch.exp(y)) - 4 * torch.arctan(torch.exp(x))
 
-        # "static breather-like"
-        omega = .6
-        return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
+        ## "static breather-like"
+        #omega = .6
+        #return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
 
         ## periodic lattice solitons
         #m = 25
@@ -56,11 +60,12 @@ class SineGordonIntegrator:
         #        u += torch.arctan(torch.exp(y - m * L))
         #return u
 
-        ## ring soliton
+        # ring soliton
         #R = 1.001
-        ## stability assertion
+        # stability assertion
         #assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
-        #return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+        R = .5
+        return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
 
         ## method to construct other ring solitons?
         #R = 1.5
@@ -92,17 +97,61 @@ class SineGordonIntegrator:
         #sn, cn, dn, ph = ellipj(u, m)
         #return torch.tensor(sn)
 
- 
+        def karhunen_loeve_sample1(cov_func=None,): 
+            def gaussian_covariance(points):
+                length_scale = 2 * self.L / self.nx
+                dists = np.linalg.norm(points[:, None] - points[None, :], axis=2)
+                return np.exp(-dists**2 / (2 * length_scale**2))
+
+            if cov_func is None: cov_func = gaussian_covariance 
+
+            X, Y = self.X, self.Y
+            points = np.vstack([X.ravel(), Y.ravel()]).T 
+            cov_matrix = cov_func(points)
+            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)   
+            z = np.random.normal(size=(len(eigenvalues)))
+
+            eps = 1
+            x0, y0 = np.random.uniform(low=-self.L + eps, high=self.L - eps, size=(2,))
+            width = .5
+            mean = 4 * np.arctan(np.exp(-(points[:, 0] - x0) + (points[:, 1] - y0) / width))
+            mean /= (points[:, 0] ** 2 + points[:, 1] ** 2) / 0.1 ** 2
+
+            sample = mean + np.sum(np.sqrt(eigenvalues)[:, None] * eigenvectors.T * z, axis=0)
+            sample = sample.reshape((self.nx, self.ny))
+            from scipy import signal
+            k = 6
+            for i in range(k//2,k):
+                sample = signal.wiener(sample, mysize=(i+1,i+1))
+
+            return torch.tensor(sample)
+
+        #def sample2(): 
+        #    X, Y = self.X, self.Y
+        #    N = np.random.randint(low=3, high=12,)
+        #    Ai = np.random.beta(.5, .5, (N,))
+
+        #    kix = np.random.uniform(low=-self.L, high=self.L, size=(N,))
+        #    kiy = np.random.uniform(low=-self.L, high=self.L, size=(N,))
+        #    
+        #    u = np.zeros_like(X) 
+        #    for i in range(N): 
+        #        u += Ai[i] * (1./np.cosh(kix[i] * X)) * (1./np.cosh(kiy[i] * Y)) 
+        #    return torch.tensor(u)
+
+        #return sample2()
+
+         
     def lapl(self, u):
         def u_yy(a):
             dy = abs(self.ymax - self.ymin) / (a.shape[1] - 1)
-            uyy = torch.zeros_like(a)
+            uyy = torch.zeros_like(a) if isinstance(a, torch.Tensor) else np.zeros_like(a)
             uyy[1:-1, 1:-1] = (a[1:-1, 2:] + a[1:-1, :-2] - 2 * a[1:-1, 1:-1]) / (dy ** 2)
             return uyy
 
         def u_xx(a):
             dx = abs(self.xmax - self.xmin) / (a.shape[0] - 1)
-            uxx = torch.zeros_like(a)
+            uxx = torch.zeros_like(a) if isinstance(a, torch.Tensor) else np.zeros_like(a)
             uxx[1:-1, 1:-1] = (a[2:, 1:-1] + a[:-2, 1:-1] - 2 * a[1:-1, 1:-1]) / (dx ** 2)
             return uxx
         
@@ -156,7 +205,7 @@ class SineGordonIntegrator:
 
     def evolve_ETD1(self):
         # ETD1
-
+        show_matrix_structure = False
         def f(x):
             # sine-Gordon
             return -torch.sin(x)
@@ -171,37 +220,35 @@ class SineGordonIntegrator:
         self.v[0] = v0
         
         dt = self.dt
-        def build_L(): 
-            N = self.nx
-            assert self.nx == self.ny
-            dx = 2 * self.L / (self.nx - 1)
-            h2 = dx ** 2
-            i_h2 = 1 / h2
-            self.Lap = np.zeros((N, N))
-            for i in range(N):
-                self.Lap[i, i] = -4
-                if i > 0:
-                    self.Lap[i, i - 1] = 1
-                if i < N - 1:
-                    self.Lap[i, i + 1] = 1
-            self.Lap = i_h2 * (
-                            np.kron(np.eye(N), self.Lap) + np.kron(self.Lap, np.eye(N))
-                        )
-            self.Lap[0,   :] = 0
-            self.Lap[-1,  :] = 0
-            self.Lap[: ,  0] = 0
-            self.Lap[: , -1] = 0
-            self.Lap[0, 0] = self.Lap[-1, -1] = 1.
-            #self.Lap = (np.kron(np.eye(N), self.Lap) + np.kron(self.Lap, np.eye(N)))
+        def textbook_laplacian(nx, ny, Lx, Ly):
+            assert nx == ny
+            assert Lx == Ly
+            dx = 2 * Lx / (nx + 1)
+
+            middle_diag = -4 * np.ones((nx + 2))
+            middle_diag[0] = middle_diag[-1] = -3
+            left_upper_diag = lower_right_diag = middle_diag + np.ones((nx + 2))
+
+            diag = np.concat([left_upper_diag, *(nx * [middle_diag]), lower_right_diag])
+            offdiag_pos = np.ones((nx + 2) * (nx + 2) - 1)
+
+            inner_outer_identity = np.ones((nx + 2) * (nx + 2) - (nx + 2))
+
+            full = diags(
+                    [diag, offdiag_pos, offdiag_pos, inner_outer_identity, inner_outer_identity],
+                    [0, -1, 1, nx+2, -nx-2], shape=((nx + 2) ** 2, (nx + 2) ** 2)
+                    )
+
+            return ((1/dx) ** 2 * full).tocsc()
         
-        build_L()
-        
+        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2, self.L, self.L)
+            
         from scipy.linalg import expm
         from numpy.linalg import cond
-        torch_lapl = torch.tensor(self.Lap, dtype=torch.float64)
-        exp_L_dt = torch.tensor(expm(self.Lap * dt), dtype=torch.float64)
+        torch_lapl = torch.tensor(self.Lap.todense(), dtype=torch.float64)
+        exp_L_dt = torch.tensor(expm(self.Lap.todense() * dt), dtype=torch.float64)
         Id = torch.eye(exp_L_dt.shape[0], dtype=torch.float64)
-        torch_lapl_inv = torch.tensor(np.linalg.inv(self.Lap), dtype=torch.float64)
+        torch_lapl_inv = torch.tensor(sp.linalg.inv(self.Lap).todense(), dtype=torch.float64)
 
         nz_mask = exp_L_dt != 0.
         assert np.abs(cond(exp_L_dt.detach().numpy())) < 1e6
@@ -222,6 +269,23 @@ class SineGordonIntegrator:
                 dtype=torch.float64
                 )
         propagator = L_inv @ (expon - torch.eye(expon.shape[0], dtype=torch.float64))
+
+        if show_matrix_structure:
+            plt.matshow(expon)
+            plt.title("expon")
+            plt.show()
+
+            plt.matshow(L)
+            plt.title("L")
+            plt.show()
+
+            plt.matshow(L_inv)
+            plt.title("L_inv")
+            plt.show()
+
+            plt.matshow(propagator)
+            plt.title("propagator")
+            plt.show()
  
         for i in tqdm(range(1, nt)):
             u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
@@ -236,6 +300,76 @@ class SineGordonIntegrator:
             self.apply_neumann_boundary(un, vn)
 
             self.u[i], self.v[i] = un, vn
+
+    def evolve_gautschi_lf(self,):
+        def f(x):
+            # sine-Gordon
+            return -np.sin(x)
+
+            ## Klein-Gordon
+            #return x + x ** 3
+
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+
+        u0 = u0.detach().numpy()
+        v0 = v0.detach().numpy()
+
+        self.u = np.zeros((self.nt, self.nx, self.ny))
+        self.v = np.zeros((self.nt, self.nx, self.ny))
+    
+        self.u[0] = u0
+        self.v[0] = v0
+
+        self.u[1] = (
+            # assume v0 can be anything here; might need to change over time
+            u0 + self.dt * v0 +
+            0.5 * self.dt**2 * self.lapl(u0) +
+            0.5 * self.dt**2 * f(u0)
+        )
+        
+        dt = self.dt
+
+        def textbook_laplacian(nx, ny, Lx, Ly):
+            assert nx == ny
+            assert Lx == Ly
+            dx = 2 * Lx / (nx + 1)
+
+            middle_diag = -4 * np.ones((nx + 2))
+            middle_diag[0] = middle_diag[-1] = -3
+            left_upper_diag = lower_right_diag = middle_diag + np.ones((nx + 2))
+
+            diag = np.concat([left_upper_diag, *(nx * [middle_diag]), lower_right_diag])
+            offdiag_pos = np.ones((nx + 2) * (nx + 2) - 1)
+
+            inner_outer_identity = np.ones((nx + 2) * (nx + 2) - (nx + 2))
+
+            full = diags(
+                    [diag, offdiag_pos, offdiag_pos, inner_outer_identity, inner_outer_identity],
+                    [0, -1, 1, nx+2, -nx-2], shape=((nx + 2) ** 2, (nx + 2) ** 2)
+                    )
+
+            return ((1/dx) ** 2 * full).tocsc()
+
+        def apply_sinc2(A, dt):
+            # assume A is actually A^{1/2}
+            data = scipy.special.sinc(dt * A.data / 2)
+            return sp.csc_matrix((data, A.indices, A.indptr), shape=A.shape)
+        
+        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2, self.L, self.L)
+     
+        lap_inv = sp.linalg.inv(self.Lap) 
+        lap_sqrt = sp.csc_matrix(scipy.linalg.sqrtm(self.Lap.todense()))
+        psi_dtA = apply_sinc2(lap_sqrt, dt)
+        for i in tqdm(range(1, self.nt)):
+            ub, vb = self.u[i - 1].reshape(self.nx * self.ny), self.v[i - 1].reshape(self.nx * self.ny)
+
+            vhalf = vb + .5 * dt * psi_dtA @ (-self.Lap @ ub + np.sin(ub))
+            un = ub + dt * vhalf
+
+            self.v[i] = (vhalf + .5 * dt * psi_dtA @ (-self.Lap @ un + np.sin(un))).reshape((self.nx, self.ny))
+            self.u[i] = un.reshape((self.nx, self.ny))
+            
             
 
 def calculate_energy(u, v, nx, ny, dx, dy):
@@ -263,10 +397,11 @@ if __name__ == '__main__':
 
     L, T, nt, nx, ny, device = 5., 10., 400, 36, 36, 'cpu'
     solver = SineGordonIntegrator(L, T, nt, nx, ny, device)
-    solver.evolve()
+    #solver.evolve()
     #solver.evolve_ETD1()
+    solver.evolve_gautschi_lf()
     X, Y = solver.X, solver.Y
-    data = solver.u.cpu().numpy() 
+    data = solver.u.cpu().numpy() if isinstance(solver.u, torch.Tensor) else solver.u
  
     assert len(argv) > 1
     animate = argv[1].lower() == 'true' or int(argv[1].lower()) == 1  
