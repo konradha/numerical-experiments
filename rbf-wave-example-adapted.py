@@ -11,7 +11,7 @@ from rbf.pde.nodes import poisson_disc_nodes
 def analytical(x, y, t):
     return 4 * np.arctan(np.exp(x + y - t))
 
-L = 5.
+L = 10.
 vert = np.array([[-L, -L], [L, -L], [L, L], [-L, L]])
 smp = np.array([[0, 1], [1, 2], [2, 3], [3, 0]])
 
@@ -47,12 +47,16 @@ def f(x, y):
     #sn, cn, dn, ph = ellipj(u, m)
     #return np.array(sn)
 
-    # ring soliton
-    #R = 1.001
-    R =  .5
-    # stability assertion
-    #assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
-    return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+    ## ring soliton
+    ##R = 1.001
+    #R =  .5
+    ## stability assertion
+    ##assert R > 1 and R ** 2 < 2 * (2 * L) ** 2
+    #return 4 * np.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+
+    R = .5
+    return 4 * np.arctan(((x - 5.) ** 2 + (y - 5.) ** 2 - R ** 2) / (2 * R))
+
 
 
 def g(x, y):

@@ -7,10 +7,40 @@ import scipy
 from scipy.sparse import diags
 from scipy import sparse as sp
 
+
+def u_x(u, Lx,):
+    dx = 2 * Lx / (u.shape[0] - 1)
+    du_x = torch.zeros_like(u) if isinstance(u, torch.Tensor) else np.zeros_like(u)
+    du_x[1:-1, :] = (u[2:, :] - u[:-2, :]) / (2 * dx)
+    du_x[0, :] = (u[1, :] - u[0, :]) / dx
+    du_x[-1, :] = (u[-1, :] - u[-2, :]) / dx
+    return du_x
+
+def u_y(u, Ly):
+    dy = 2 * Ly / (u.shape[1] - 1)
+    du_y = torch.zeros_like(u) if isinstance(u, torch.Tensor) else np.zeros_like(u)
+    du_y[:, 1:-1] = (u[:, 2:] - u[:, :-2]) / (2 * dy)
+    du_y[:, 0] = (u[:, 1] - u[:, 0]) / dy
+    du_y[:, -1] = (u[:, -1] - u[:, -2]) / dy
+    return du_y
+
+def L_op(u, Lx, Ly):
+    nx, ny = u.shape
+    xn = torch.linspace(-Lx, Lx, nx) if isinstance(u, torch.Tensor) else np.linspace(-Lx, Lx, nx) 
+    yn = torch.linspace(-Ly, Ly, ny) if isinstance(u, torch.Tensor) else np.linspace(-Ly, Ly, ny)
+    ux = u_x(u, Lx)
+    uy = u_y(u, Ly)
+    return yn * ux  - xn * uy
+
+def analytical_soliton_solution(X, Y, t):
+    return 4 * np.arctan(np.exp(X + Y - t))
+
 class SineGordonIntegrator:
-    def __init__(self, L, T, nt, nx, ny, device='cuda',):
+    def __init__(self, Lx_min, Lx_max, Ly_min, Ly_max, T, nt, nx, ny, device='cuda',):
         self.device = torch.device(device)
-        self.L = L
+        self.Lx_min, self.Lx_max = Lx_min, Lx_max
+        self.Ly_min, self.Ly_max = Ly_min, Ly_max
+
         self.T = T
         self.nt = nt
         self.dt = T / nt
@@ -19,11 +49,13 @@ class SineGordonIntegrator:
 
         self.tn = torch.linspace(0, T, nt)
         
-        xn = torch.linspace(-L, L, self.nx, device=self.device)
-        yn = torch.linspace(-L, L, self.ny, device=self.device)
+        xn = torch.linspace(Lx_min, Lx_max, self.nx, device=self.device)
+        yn = torch.linspace(Ly_min, Ly_max, self.ny, device=self.device)
 
-        self.xmin, self.xmax = -L, L 
-        self.ymin, self.ymax = -L, L 
+        self.xn, self.yn = xn, yn
+
+        self.xmin, self.xmax = Lx_min, Lx_max 
+        self.ymin, self.ymax = Ly_min, Ly_max 
 
         self.u = torch.zeros((self.nt, self.nx, self.ny), device=self.device, dtype=torch.float64)
         self.v = torch.zeros((self.nt, self.nx, self.ny), device=self.device, dtype=torch.float64)
@@ -60,12 +92,13 @@ class SineGordonIntegrator:
         #        u += torch.arctan(torch.exp(y - m * L))
         #return u
 
-        # ring soliton
-        #R = 1.001
-        # stability assertion
-        #assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
+        ## ring soliton
+        ##R = 1.001
+        ## stability assertion
+        ##assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
         R = .5
-        return 4 * torch.arctan((x ** 2 + y ** 2 - R ** 2) / (2 * R))
+        return 4 * torch.arctan(((x - 5.) ** 2 + (y - 5.) ** 2 - R ** 2) / (2 * R))
+
 
         ## method to construct other ring solitons?
         #R = 1.5
@@ -159,10 +192,63 @@ class SineGordonIntegrator:
 
 
     def stormer_verlet_step(self, u, v, dt, t, i):
+        @staticmethod
+        def boundary_x(x, Y, t):
+            # x = -L or x = L
+            x = float(x)
+            t = t * torch.ones_like(Y)
+            #print(type(x), f"{x=}")
+            #print(type(Y), f"{Y=}")
+            #print(type(t), f"{t=}")
+            return 4 * torch.exp(x + Y + t) / (torch.exp(2 * t) + torch.exp(2 * x + 2 * Y))
+    
+        @staticmethod
+        def boundary_y(X, y, t):
+            # y = -L or y = L
+            y = float(y)
+            t = t * torch.ones_like(X)
+            #print(type(X), f"{X=}")
+            #print(type(y), f"{y=}")
+            #print(type(t), f"{t=}")
+            return 4 * torch.exp(X + y + t) / (torch.exp(2 * t) + torch.exp(2 * X + 2 * y))
+     
+    
+        def apply_boundary_condition(u, v, t):
+            dx = abs(self.xmax - self.xmin) / (self.nx - 1)
+            dy = abs(self.ymax - self.ymin) / (self.ny - 1)
+            dt = self.dt
+
+            xm, xM = torch.tensor(self.xmin, dtype=torch.float64), torch.tensor(self.xmax, dtype=torch.float64)
+            ym, yM = torch.tensor(self.ymin, dtype=torch.float64), torch.tensor(self.ymax, dtype=torch.float64)
+   
+            # u's ghost cells get approximation following boundary condition
+            u[0,  1:-1] = u[1, 1:-1] - dx * boundary_x(xm, self.yn[1:-1], t)
+            u[-1, 1:-1] = u[-2, 1:-1] + dx * boundary_x(xM, self.yn[1:-1], t)
+            
+            u[1:-1,  0] = u[1:-1, 1] - dy * boundary_y(self.xn[1:-1], ym, t)
+            u[1:-1, -1] = u[1:-1, -2] + dy * boundary_y(self.xn[1:-1], yM, t)
+            
+            u[0, 0] = (u[1, 0] + u[0, 1])/2 - dx*boundary_x(xm, ym, t)/2 \
+                      - dy*boundary_y(xm, ym, t)/2
+            u[-1, 0] = (u[-2, 0] + u[-1, 1])/2 + dx*boundary_x(xM, ym, t)/2 \
+                       - dy*boundary_y(xM, ym, t)/2
+            u[0, -1] = (u[1, -1] + u[0, -2])/2 - dx*boundary_x(xm, yM, t)/2 \
+                       + dy*boundary_y(xm, yM, t)/2
+            u[-1, -1] = (u[-2, -1] + u[-1, -2])/2 + dx*boundary_x(xM, yM, t)/2 \
+                        + dy*boundary_y(xM, yM, t)/2
+            
+            # v get the hard boundary condition
+            v[0, 1:-1]  = boundary_x(xm, self.yn[1:-1], t)
+            v[-1, 1:-1] = boundary_x(xM, self.yn[1:-1], t)
+            v[1:-1, 0]  = boundary_y(self.xn[1:-1], ym, t)
+            v[1:-1, -1] = boundary_y(self.xn[1:-1], yM, t)
+    
+    
+    
         def f(x):
             # sine-Gordon
             return torch.sin(x)
-
+            
             ## Klein-Gordon
             #return x + x ** 3
 
@@ -170,13 +256,16 @@ class SineGordonIntegrator:
         if i == 1:
             v = torch.zeros_like(u)
             u_n = u + dt * v + 0.5 * dt ** 2 * (self.lapl(u) - f(u))
+            self.apply_neumann_boundary(u_n, v)
+            #apply_boundary_condition(u_n, v, self.dt)
             return u_n, v
 
-        op = self.lapl(u) - f(u)
+        op = self.lapl(u) - f(u) 
         u_n = 2 * self.u[i - 1] - self.u[i - 2] + op * dt ** 2
         v_n = (u_n - self.u[i - 1]) / dt
         
         self.apply_neumann_boundary(u_n, v_n)
+        #apply_boundary_condition(u_n, v_n, t)
         return u_n, v_n 
 
     def apply_neumann_boundary(self, u, v):
@@ -220,10 +309,12 @@ class SineGordonIntegrator:
         self.v[0] = v0
         
         dt = self.dt
-        def textbook_laplacian(nx, ny, Lx, Ly):
+        def textbook_laplacian(nx, ny,):
             assert nx == ny
-            assert Lx == Ly
-            dx = 2 * Lx / (nx + 1)
+            # have only thought about square domain for now
+            assert self.Lx_min == self.Ly_min
+            assert self.Lx_max == self.Ly_max
+            dx = (self.Lx_max - self.Lx_min) / (nx + 1)
 
             middle_diag = -4 * np.ones((nx + 2))
             middle_diag[0] = middle_diag[-1] = -3
@@ -240,8 +331,23 @@ class SineGordonIntegrator:
                     )
 
             return ((1/dx) ** 2 * full).tocsc()
-        
-        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2, self.L, self.L)
+            
+            #middle_diag = -2 * np.ones((nx + 2))
+            #offdiag = np.ones((nx + 1))
+            #full = diags(
+            #        [middle_diag, offdiag, offdiag],
+            #        [0, -1, 1,], shape=((nx + 2) ** 2, (nx + 2) ** 2)
+            #        )
+            #return full
+
+
+            
+        #self.Lap = neumann_laplacian(self.nx - 2, self.ny - 2, self.L, self.L)
+        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2)
+
+        #eigenvalues, _ = scipy.sparse.linalg.eigs(self.Lap)
+        #print(eigenvalues)
+        #raise Exception
             
         from scipy.linalg import expm
         from numpy.linalg import cond
@@ -268,6 +374,12 @@ class SineGordonIntegrator:
                 expm(self.dt * L.detach().numpy()),
                 dtype=torch.float64
                 )
+
+        #eigenvalues, eigenvectors = eigs(L., k=2)
+        #D = np.diag(eigenvalues)
+        #exp_tD = np.diag(np.exp(dt * eigenvalues))
+        #expon = eigenvectors @ exp_tD @ np.linalg.inv(eigenvectors)
+
         propagator = L_inv @ (expon - torch.eye(expon.shape[0], dtype=torch.float64))
 
         if show_matrix_structure:
@@ -287,7 +399,7 @@ class SineGordonIntegrator:
             plt.title("propagator")
             plt.show()
  
-        for i in tqdm(range(1, nt)):
+        for i in tqdm(range(1, self.nt)):
             u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
 
             uv    = torch.cat([u, v], dim=0)
@@ -315,8 +427,8 @@ class SineGordonIntegrator:
         u0 = u0.detach().numpy()
         v0 = v0.detach().numpy()
 
-        self.u = np.zeros((self.nt, self.nx, self.ny))
-        self.v = np.zeros((self.nt, self.nx, self.ny))
+        self.u = np.zeros((self.nt, self.nx, self.ny), dtype=np.complex128)
+        self.v = np.zeros((self.nt, self.nx, self.ny), dtype=np.complex128)
     
         self.u[0] = u0
         self.v[0] = v0
@@ -357,9 +469,12 @@ class SineGordonIntegrator:
             return sp.csc_matrix((data, A.indices, A.indptr), shape=A.shape)
         
         self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2, self.L, self.L)
-     
+        
         lap_inv = sp.linalg.inv(self.Lap) 
         lap_sqrt = sp.csc_matrix(scipy.linalg.sqrtm(self.Lap.todense()))
+
+
+        
         psi_dtA = apply_sinc2(lap_sqrt, dt)
         for i in tqdm(range(1, self.nt)):
             ub, vb = self.u[i - 1].reshape(self.nx * self.ny), self.v[i - 1].reshape(self.nx * self.ny)
@@ -395,12 +510,18 @@ if __name__ == '__main__':
     from mpl_toolkits.mplot3d import Axes3D
     from sys import argv
 
-    L, T, nt, nx, ny, device = 5., 10., 400, 36, 36, 'cpu'
-    solver = SineGordonIntegrator(L, T, nt, nx, ny, device)
+    L, T, nt, nx, ny, device = 12., 10., 500, 32, 32, 'cpu'
+    dx = 2 * L / (nx + 1)
+    dy = 2 * L / (ny + 1)
+    assert (T / nt) / ((L) ** 2 / (dx * dy)) < 1 
+
+    # initialize with square domain
+    solver = SineGordonIntegrator(-L, L, -L, L, T, nt, nx, ny, device)
+    
     #solver.evolve()
-    #solver.evolve_ETD1()
-    solver.evolve_gautschi_lf()
-    X, Y = solver.X, solver.Y
+    solver.evolve_ETD1()
+    #solver.evolve_gautschi_lf()
+    X, Y = solver.X.cpu().numpy(), solver.Y.cpu().numpy()
     data = solver.u.cpu().numpy() if isinstance(solver.u, torch.Tensor) else solver.u
  
     assert len(argv) > 1
@@ -412,7 +533,12 @@ if __name__ == '__main__':
         surf = ax.plot_surface(X, Y, data[0], cmap='viridis',)
         def update(frame):
             ax.clear()
-            ax.plot_surface(X, Y, (data[frame]), cmap='viridis')
+
+            ax.plot_surface(X, Y,
+                    data[frame],
+                    #np.abs(data[frame] - analytical_soliton_solution(X, Y, (frame) * (T/nt))),
+                    #analytical_soliton_solution(X, Y, frame * (T/nt)),
+                    cmap='viridis')
         fps = 300
         ani = FuncAnimation(fig, update, frames=solver.nt, interval=solver.nt / fps, )
         plt.show()
@@ -420,7 +546,7 @@ if __name__ == '__main__':
     else:
         es = []
         vs = []
-        dx = dy = 2 * L / nx
+        dx = dy = L / nx
         for i in range(1, solver.nt):
             u = data[i]
             v = (data[i] - data[i - 1]) / (solver.dt)
@@ -448,8 +574,8 @@ if __name__ == '__main__':
         
 
         # data saved when calling without animation
-        with open('sv-ring-soliton.npy', 'wb') as f:
+        with open('sv-analytical-soliton.npy', 'wb') as f:
             np.save(f, data[:, 1:-1, 1:-1])
             np.save(f, vs[:, 1:-1, 1:-1])
-        with open('sv-ring-soliton-tn.npy', 'wb') as f:
-            np.save(f, solver.tn.detach().numpy()) 
+        #with open('sv-ring-soliton-tn.npy', 'wb') as f:
+        #    np.save(f, solver.tn.detach().numpy()) 
