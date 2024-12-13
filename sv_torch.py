@@ -292,6 +292,7 @@ class SineGordonIntegrator:
             self.u[i], self.v[i] = self.stormer_verlet_step(
                 self.u[i-1], self.v[i-1], self.dt, t, i)
 
+
     def evolve_ETD1(self):
         # ETD1
         show_matrix_structure = False
@@ -413,6 +414,106 @@ class SineGordonIntegrator:
 
             self.u[i], self.v[i] = un, vn
 
+    def evolve_ETD2(self):
+        # ETD2
+        show_matrix_structure = False
+        def f(x):
+            # sine-Gordon
+            return -torch.sin(x)
+
+            ## Klein-Gordon
+            #return x + x ** 3
+
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+        
+        dt = self.dt
+        def textbook_laplacian(nx, ny,):
+            assert nx == ny
+            # have only thought about square domain for now
+            assert self.Lx_min == self.Ly_min
+            assert self.Lx_max == self.Ly_max
+            dx = (self.Lx_max - self.Lx_min) / (nx + 1)
+
+            middle_diag = -4 * np.ones((nx + 2))
+            middle_diag[0] = middle_diag[-1] = -3
+            left_upper_diag = lower_right_diag = middle_diag + np.ones((nx + 2))
+
+            diag = np.concat([left_upper_diag, *(nx * [middle_diag]), lower_right_diag])
+            offdiag_pos = np.ones((nx + 2) * (nx + 2) - 1)
+
+            inner_outer_identity = np.ones((nx + 2) * (nx + 2) - (nx + 2))
+
+            full = diags(
+                    [diag, offdiag_pos, offdiag_pos, inner_outer_identity, inner_outer_identity],
+                    [0, -1, 1, nx+2, -nx-2], shape=((nx + 2) ** 2, (nx + 2) ** 2)
+                    )
+
+            return ((1/dx) ** 2 * full).tocsc()
+           
+        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2)
+
+        from scipy.linalg import expm
+        from numpy.linalg import cond
+        torch_lapl = torch.tensor(self.Lap.todense(), dtype=torch.float64)
+        exp_L_dt = torch.tensor(expm(self.Lap.todense() * dt), dtype=torch.float64)
+        Id = torch.eye(exp_L_dt.shape[0], dtype=torch.float64)
+        torch_lapl_inv = torch.tensor(sp.linalg.inv(self.Lap).todense(), dtype=torch.float64)
+
+        nz_mask = exp_L_dt != 0.
+        assert np.abs(cond(exp_L_dt.detach().numpy())) < 1e6
+        
+        zeros = torch.zeros_like(Id) 
+        L = torch.cat([
+                            torch.cat([zeros,         Id], dim=1),
+                            torch.cat([torch_lapl, zeros], dim=1),
+                        ], dim=0)
+        L_inv = torch.cat([
+                            torch.cat([zeros, torch_lapl_inv], dim=1),
+                            torch.cat([Id,             zeros], dim=1),
+                            ], dim=0)
+        assert torch.allclose(L @ L_inv, torch.eye(L.shape[0], dtype=torch.float64))
+
+        expon = torch.tensor(
+                expm(self.dt * L.detach().numpy()),
+                dtype=torch.float64
+                )
+
+
+        # ETD-1 propagatro
+        propagator = L_inv @ (expon - torch.eye(expon.shape[0], dtype=torch.float64))
+        
+        # define ETD-2 propagator
+        # that's still wrong!
+        propagator2 =  L_inv @ L_inv @ (
+                expon - torch.eye(expon.shape[0], dtype=torch.float64) - dt * L)
+         
+        gamma_prev = torch.cat([torch.zeros_like(self.u[0]), f(self.u[0])],) 
+        for i in tqdm(range(1, self.nt)):
+            u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
+
+            uv    = torch.cat([u, v], dim=0)
+            gamma = torch.cat([torch.zeros_like(u), f(u)],)
+
+            # this matmul is unnecessarily dense. We can make ETD methods much faster
+            # TODO use sparse matrices actually
+            u_vec = expon @ uv + propagator @ gamma
+
+            un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+            vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+
+            if i > 1:
+                u_vec += propagator2 @ (gamma - gamma_prev)
+
+            gamma_prev = gamma
+            un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+            vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+            self.apply_neumann_boundary(un, vn)
+            self.u[i], self.v[i] = un, vn
+
     def evolve_gautschi_lf(self,):
         def f(x):
             # sine-Gordon
@@ -519,7 +620,8 @@ if __name__ == '__main__':
     solver = SineGordonIntegrator(-L, L, -L, L, T, nt, nx, ny, device)
     
     #solver.evolve()
-    solver.evolve_ETD1()
+    #solver.evolve_ETD1()
+    solver.evolve_ETD2()
     #solver.evolve_gautschi_lf()
     X, Y = solver.X.cpu().numpy(), solver.Y.cpu().numpy()
     data = solver.u.cpu().numpy() if isinstance(solver.u, torch.Tensor) else solver.u
