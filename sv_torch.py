@@ -47,6 +47,9 @@ class SineGordonIntegrator:
         self.nx = nx + 2
         self.ny = ny + 2
 
+        self.dx = (self.Lx_max - self.Lx_min) / (nx + 1)
+        self.dy = (self.Ly_max - self.Ly_min) / (ny + 1)
+
         self.tn = torch.linspace(0, T, nt)
         
         xn = torch.linspace(Lx_min, Lx_max, self.nx, device=self.device)
@@ -75,29 +78,29 @@ class SineGordonIntegrator:
         ## soliton-antisoliton
         #return 4 * torch.arctan(torch.exp(y)) - 4 * torch.arctan(torch.exp(x))
 
-        ## "static breather-like"
-        #omega = .6
-        #return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
+        # "static breather-like"
+        omega = .6
+        return 4 * torch.arctan(torch.sin(omega * x) / torch.cosh(omega * y))
 
         ## periodic lattice solitons
         #m = 25
         #n = m // 2
-        #L = self.L / m ** 2 
+        #L = self.Lx_max / m ** 2 
         #u = 0
         #for i in range(m):
         #    for j in range(n):
-        #        u += torch.arctan(torch.exp(x - n * L))
+        #        u += torch.arctan(torch.exp(x - n * L / np.pi))
         #for i in range(m):
         #    for j in range(n):
-        #        u += torch.arctan(torch.exp(y - m * L))
+        #        u += torch.arctan(torch.exp(y - m * L / np.pi))
         #return u
 
         ## ring soliton
         ##R = 1.001
         ## stability assertion
         ##assert R > 1 and R ** 2 < 2 * (2 * self.L) ** 2
-        R = .5
-        return 4 * torch.arctan(((x - 5.) ** 2 + (y - 5.) ** 2 - R ** 2) / (2 * R))
+        #R = .5
+        #return 4 * torch.arctan(((x - 5.) ** 2 + (y - 5.) ** 2 - R ** 2) / (2 * R))
 
 
         ## method to construct other ring solitons?
@@ -260,13 +263,67 @@ class SineGordonIntegrator:
             #apply_boundary_condition(u_n, v, self.dt)
             return u_n, v
 
-        op = self.lapl(u) - f(u) 
+        op = (self.lapl(u) - f(u)) 
         u_n = 2 * self.u[i - 1] - self.u[i - 2] + op * dt ** 2
         v_n = (u_n - self.u[i - 1]) / dt
         
         self.apply_neumann_boundary(u_n, v_n)
         #apply_boundary_condition(u_n, v_n, t)
         return u_n, v_n 
+    def pseudo_stormer_verlet_step(self, u, v, dt, t, i):
+        def apply_boundary_condition(u, v, t):
+            dx = abs(self.xmax - self.xmin) / (self.nx - 1)
+            dy = abs(self.ymax - self.ymin) / (self.ny - 1)
+            dt = self.dt
+
+            xm, xM = torch.tensor(self.xmin, dtype=torch.float64), torch.tensor(self.xmax, dtype=torch.float64)
+            ym, yM = torch.tensor(self.ymin, dtype=torch.float64), torch.tensor(self.ymax, dtype=torch.float64)
+   
+            # u's ghost cells get approximation following boundary condition
+            u[0,  1:-1] = u[1, 1:-1] - dx * boundary_x(xm, self.yn[1:-1], t)
+            u[-1, 1:-1] = u[-2, 1:-1] + dx * boundary_x(xM, self.yn[1:-1], t)
+            
+            u[1:-1,  0] = u[1:-1, 1] - dy * boundary_y(self.xn[1:-1], ym, t)
+            u[1:-1, -1] = u[1:-1, -2] + dy * boundary_y(self.xn[1:-1], yM, t)
+            
+            u[0, 0] = (u[1, 0] + u[0, 1])/2 - dx*boundary_x(xm, ym, t)/2 \
+                      - dy*boundary_y(xm, ym, t)/2
+            u[-1, 0] = (u[-2, 0] + u[-1, 1])/2 + dx*boundary_x(xM, ym, t)/2 \
+                       - dy*boundary_y(xM, ym, t)/2
+            u[0, -1] = (u[1, -1] + u[0, -2])/2 - dx*boundary_x(xm, yM, t)/2 \
+                       + dy*boundary_y(xm, yM, t)/2
+            u[-1, -1] = (u[-2, -1] + u[-1, -2])/2 + dx*boundary_x(xM, yM, t)/2 \
+                        + dy*boundary_y(xM, yM, t)/2
+            
+            # v get the hard boundary condition
+            v[0, 1:-1]  = boundary_x(xm, self.yn[1:-1], t)
+            v[-1, 1:-1] = boundary_x(xM, self.yn[1:-1], t)
+            v[1:-1, 0]  = boundary_y(self.xn[1:-1], ym, t)
+            v[1:-1, -1] = boundary_y(self.xn[1:-1], yM, t)
+    
+    
+    
+        def f(x):
+            # sine-Gordon
+            return torch.sin(x)
+            
+            ## Klein-Gordon
+            #return x + x ** 3
+
+        # first step needs special treatment as we cannot yet use the pre-preceding
+        if i == 1:
+            v = torch.zeros_like(u)
+            u_n = u + dt * v + 0.5 * dt ** 2 * (self.lapl(u) - f(u))
+            self.apply_neumann_boundary(u_n, v)
+            #apply_boundary_condition(u_n, v, self.dt)
+            return u_n, v
+
+        op = (self.lapl(u) - f(u)) 
+        v_n = v + dt * op
+        u_n = u + dt * v_n
+        self.apply_neumann_boundary(u_n, v_n)
+
+        return u_n, v_n
 
     def apply_neumann_boundary(self, u, v):
         # Boundary conditions similar to NumPy version
@@ -280,18 +337,210 @@ class SineGordonIntegrator:
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
 
+    def evolve_pseudo(self):
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+        for i, t in enumerate(tqdm(self.tn)):
+            if i == 0: continue # we already initialized u0, v0
+            self.u[i], self.v[i] = self.stormer_verlet_step(
+                self.u[i-1], self.v[i-1], self.dt, t, i)
+         
+
     def evolve(self):
         u0 = self.initial_u_grf(self.X, self.Y)
         v0 = torch.zeros_like(u0)
     
         self.u[0] = u0
         self.v[0] = v0
+    
+        dt = self.dt
 
         for i, t in enumerate(tqdm(self.tn)):
             if i == 0: continue # we already initialized u0, v0
             self.u[i], self.v[i] = self.stormer_verlet_step(
                 self.u[i-1], self.v[i-1], self.dt, t, i)
+        for i in range(1, self.nt - 1):
+            self.v[i] = (self.u[i+1] - self.u[i-1]) / (2 * dt)
+        self.v[-1] = self.v[-2]
 
+    def evolve_energy_conserving(self):
+        def f(x):
+            return torch.sin(x)
+        # Marazzato et al.
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+
+        dt = self.dt
+
+        vhalf = v0 + .5 * dt * (self.lapl(u0) - torch.sin(u0))
+
+        def free_flight(u, t, tf, vhalf):
+            return u + (tf - t) * vhalf
+
+        def integrate(u, ti, tf, vhalf, n=10):
+            vals = torch.zeros(n, u.shape[0], u.shape[1])
+            dtt = (tf - ti) / n # != dt in usual program!
+            for k in range(n):
+                vals[k] = (1/n) * free_flight(u, ti + dtt * k, tf, vhalf) 
+            return torch.sum(vals, axis=0)
+
+        for i, t in tqdm(enumerate((self.tn))):
+            if i == 0: continue # we already initialized u0, v0
+            un, vn = self.u[i-1], self.v[i-1]
+
+            vhalf_old = vhalf 
+            vhalf = vhalf_old - 2 * dt * integrate(un, (i-1) * dt, i * dt, vhalf)
+            self.u[i] = un + dt * vhalf 
+           
+        for i in range(1, self.nt - 1):
+            self.v[i] = (self.u[i+1] - self.u[i-1]) / (2 * dt) 
+        self.v[-1] = self.v[-2]
+
+
+    def stormer_verlet_filter(self, u, v, dt, t, i, omega):
+        def f(u):
+            return torch.sin(u)
+
+        if i == 1:
+            v = torch.zeros_like(u)
+            u_n = u + dt * v + 0.5 * dt ** 2 * (self.lapl(u) - f(u))
+            self.apply_neumann_boundary(u_n, v)
+            return u_n, v
+
+        cos_hw = torch.cos(self.dt * omega,)
+        sinc_hw = torch.sinc(self.dt * omega / np.pi,)
+ 
+        op = (self.lapl(u) - f(u)) 
+        u_n = 2 * self.u[i - 1] - self.u[i - 2] + op * dt ** 2
+
+        v_n = (u_n - self.u[i - 2]) / (2 * dt) 
+        self.apply_neumann_boundary(u_n, v_n)
+        return u_n, v_n
+
+
+    def evolve_filter(self):
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+
+        jx = np.fft.fftfreq(self.nx, self.dx)
+        jy = np.fft.fftfreq(self.ny, self.dy)
+        JX, JY = np.meshgrid(jx, jy)
+        omega = torch.tensor(np.sqrt(JX**2 + JY**2), dtype=torch.float64)
+
+        for i, t in enumerate(tqdm(self.tn)):
+            if i == 0: continue # we already initialized u0, v0
+            self.u[i], self.v[i] = self.stormer_verlet_filter(
+                self.u[i-1], self.v[i-1], self.dt, t, i, omega)
+
+    def evolve_ETD1_sparse(self):
+        # ETD1
+        show_matrix_structure = False
+        def f(x):
+            # sine-Gordon
+            return -np.sin(x)
+
+            ## Klein-Gordon
+            #return x + x ** 3
+
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+        
+        dt = self.dt
+        def textbook_laplacian(nx, ny,):
+            assert nx == ny
+            # have only thought about square domain for now
+            assert self.Lx_min == self.Ly_min
+            assert self.Lx_max == self.Ly_max
+            dx = (self.Lx_max - self.Lx_min) / (nx + 1)
+
+            middle_diag = -4 * np.ones((nx + 2))
+            middle_diag[0] = middle_diag[-1] = -3
+            left_upper_diag = lower_right_diag = middle_diag + np.ones((nx + 2))
+
+            diag = np.concat([left_upper_diag, *(nx * [middle_diag]), lower_right_diag])
+            offdiag_pos = np.ones((nx + 2) * (nx + 2) - 1)
+
+            inner_outer_identity = np.ones((nx + 2) * (nx + 2) - (nx + 2))
+
+            full = diags(
+                    [diag, offdiag_pos, offdiag_pos, inner_outer_identity, inner_outer_identity],
+                    [0, -1, 1, nx+2, -nx-2], shape=((nx + 2) ** 2, (nx + 2) ** 2)
+                    )
+
+            return ((1/dx) ** 2 * full).tocsc()
+           
+        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2)
+
+            
+        from scipy.linalg import expm
+        from numpy.linalg import cond
+        torch_lapl = torch.tensor(self.Lap.todense(), dtype=torch.float64)
+        exp_L_dt = torch.tensor(expm(self.Lap.todense() * dt), dtype=torch.float64)
+        Id = torch.eye(exp_L_dt.shape[0], dtype=torch.float64)
+        torch_lapl_inv = torch.tensor(sp.linalg.inv(self.Lap).todense(), dtype=torch.float64)
+
+        nz_mask = exp_L_dt != 0.
+        assert np.abs(cond(exp_L_dt.detach().numpy())) < 1e6
+        
+        zeros = torch.zeros_like(Id) 
+        L = torch.cat([
+                            torch.cat([zeros,         Id], dim=1),
+                            torch.cat([torch_lapl, zeros], dim=1),
+                        ], dim=0)
+        L_inv = torch.cat([
+                            torch.cat([zeros, torch_lapl_inv], dim=1),
+                            torch.cat([Id,             zeros], dim=1),
+                            ], dim=0)
+        assert torch.allclose(L @ L_inv, torch.eye(L.shape[0], dtype=torch.float64))
+
+        small_id = diags([np.ones((nx + 2) ** 2)], [0,], shape=((nx + 2) ** 2, (nx + 2) ** 2)).tocsr()
+
+        L_top_row    = sp.hstack([sp.csr_matrix(small_id.shape), small_id]) 
+        L_bottom_row = sp.hstack([self.Lap, sp.csr_matrix(small_id.shape)])
+        L = sp.vstack([L_top_row, L_bottom_row]).tocsc()
+        Id_sparse = diags( [np.ones((L.shape[0]),)], [0,], shape=(L.shape)).tocsc()
+        L_inv = sp.linalg.spsolve(L, Id_sparse).tocsc()
+
+        expon = sp.linalg.expm(self.dt * L).tocsc()
+        propagator = L_inv @ (expon - Id_sparse).tocsc()
+
+
+        self.u = self.u.cpu().numpy() 
+        self.v = self.v.cpu().numpy()
+
+        ## _really_ crude approximation; not at all useful long-term
+        #expon = diags([
+        #    expon.diagonal(0), expon.diagonal(-1), expon.diagonal(1)
+        #    ], [0, -1, 1]).tocsc()
+
+        #propagator = diags([
+        #    propagator.diagonal(0), propagator.diagonal(-1), propagator.diagonal(1)
+        #    ], [0, -1, 1]).tocsc()
+
+        for i in tqdm(range(1, self.nt)):
+            u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
+            uv    = np.concat([u, v],)
+            gamma = np.concat([np.zeros_like(u), f(u)],)
+
+            u_vec = expon.dot(uv) + propagator.dot(gamma)
+
+            un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+            vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+            self.apply_neumann_boundary(un, vn)
+
+            self.u[i], self.v[i] = un, vn
 
     def evolve_ETD1(self):
         # ETD1
@@ -513,80 +762,7 @@ class SineGordonIntegrator:
             vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
             self.apply_neumann_boundary(un, vn)
             self.u[i], self.v[i] = un, vn
-
-    def evolve_gautschi_lf(self,):
-        def f(x):
-            # sine-Gordon
-            return -np.sin(x)
-
-            ## Klein-Gordon
-            #return x + x ** 3
-
-        u0 = self.initial_u_grf(self.X, self.Y)
-        v0 = torch.zeros_like(u0)
-
-        u0 = u0.detach().numpy()
-        v0 = v0.detach().numpy()
-
-        self.u = np.zeros((self.nt, self.nx, self.ny), dtype=np.complex128)
-        self.v = np.zeros((self.nt, self.nx, self.ny), dtype=np.complex128)
-    
-        self.u[0] = u0
-        self.v[0] = v0
-
-        self.u[1] = (
-            # assume v0 can be anything here; might need to change over time
-            u0 + self.dt * v0 +
-            0.5 * self.dt**2 * self.lapl(u0) +
-            0.5 * self.dt**2 * f(u0)
-        )
-        
-        dt = self.dt
-
-        def textbook_laplacian(nx, ny, Lx, Ly):
-            assert nx == ny
-            assert Lx == Ly
-            dx = 2 * Lx / (nx + 1)
-
-            middle_diag = -4 * np.ones((nx + 2))
-            middle_diag[0] = middle_diag[-1] = -3
-            left_upper_diag = lower_right_diag = middle_diag + np.ones((nx + 2))
-
-            diag = np.concat([left_upper_diag, *(nx * [middle_diag]), lower_right_diag])
-            offdiag_pos = np.ones((nx + 2) * (nx + 2) - 1)
-
-            inner_outer_identity = np.ones((nx + 2) * (nx + 2) - (nx + 2))
-
-            full = diags(
-                    [diag, offdiag_pos, offdiag_pos, inner_outer_identity, inner_outer_identity],
-                    [0, -1, 1, nx+2, -nx-2], shape=((nx + 2) ** 2, (nx + 2) ** 2)
-                    )
-
-            return ((1/dx) ** 2 * full).tocsc()
-
-        def apply_sinc2(A, dt):
-            # assume A is actually A^{1/2}
-            data = scipy.special.sinc(dt * A.data / 2)
-            return sp.csc_matrix((data, A.indices, A.indptr), shape=A.shape)
-        
-        self.Lap = textbook_laplacian(self.nx - 2, self.ny - 2, self.L, self.L)
-        
-        lap_inv = sp.linalg.inv(self.Lap) 
-        lap_sqrt = sp.csc_matrix(scipy.linalg.sqrtm(self.Lap.todense()))
-
-
-        
-        psi_dtA = apply_sinc2(lap_sqrt, dt)
-        for i in tqdm(range(1, self.nt)):
-            ub, vb = self.u[i - 1].reshape(self.nx * self.ny), self.v[i - 1].reshape(self.nx * self.ny)
-
-            vhalf = vb + .5 * dt * psi_dtA @ (-self.Lap @ ub + np.sin(ub))
-            un = ub + dt * vhalf
-
-            self.v[i] = (vhalf + .5 * dt * psi_dtA @ (-self.Lap @ un + np.sin(un))).reshape((self.nx, self.ny))
-            self.u[i] = un.reshape((self.nx, self.ny))
-            
-            
+                       
 
 def calculate_energy(u, v, nx, ny, dx, dy):
     ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * dx)
@@ -611,17 +787,19 @@ if __name__ == '__main__':
     from mpl_toolkits.mplot3d import Axes3D
     from sys import argv
 
-    L, T, nt, nx, ny, device = 12., 10., 500, 32, 32, 'cpu'
+    L, T, nt, nx, ny, device = 12., 10., 500, 35, 35,'cpu'
     dx = 2 * L / (nx + 1)
     dy = 2 * L / (ny + 1)
     assert (T / nt) / ((L) ** 2 / (dx * dy)) < 1 
+    dt = T / nt
 
     # initialize with square domain
     solver = SineGordonIntegrator(-L, L, -L, L, T, nt, nx, ny, device)
-    
+   
     #solver.evolve()
-    #solver.evolve_ETD1()
-    solver.evolve_ETD2()
+    #solver.evolve_filter()
+    #solver.evolve_ETD1_sparse() 
+    solver.evolve_energy_conserving()
     #solver.evolve_gautschi_lf()
     X, Y = solver.X.cpu().numpy(), solver.Y.cpu().numpy()
     data = solver.u.cpu().numpy() if isinstance(solver.u, torch.Tensor) else solver.u
@@ -641,11 +819,13 @@ if __name__ == '__main__':
                     #np.abs(data[frame] - analytical_soliton_solution(X, Y, (frame) * (T/nt))),
                     #analytical_soliton_solution(X, Y, frame * (T/nt)),
                     cmap='viridis')
+            ax.set_title(f"t={(dt * frame):.2f}")
         fps = 300
         ani = FuncAnimation(fig, update, frames=solver.nt, interval=solver.nt / fps, )
         plt.show()
         
     else:
+        
         es = []
         vs = []
         dx = dy = L / nx
@@ -662,22 +842,22 @@ if __name__ == '__main__':
         plt.ylabel("E / [1]")
         plt.show()
 
-        tc = []
-        for i in range(0, solver.nt):
-            u = data[i]
-            tc.append(topological_charge(u, dx))
-              
-        plt.plot(solver.tn, tc,)
-        plt.title("Topological Charge")
-        plt.xlabel("T / [1]")
-        plt.ylabel("")
-        plt.show()
-        vs = np.array(vs)
+        #tc = []
+        #for i in range(0, solver.nt):
+        #    u = data[i]
+        #    tc.append(topological_charge(u, dx))
+        #      
+        #plt.plot(solver.tn, tc,)
+        #plt.title("Topological Charge")
+        #plt.xlabel("T / [1]")
+        #plt.ylabel("")
+        #plt.show()
+        #vs = np.array(vs)
         
 
-        # data saved when calling without animation
-        with open('sv-analytical-soliton.npy', 'wb') as f:
-            np.save(f, data[:, 1:-1, 1:-1])
-            np.save(f, vs[:, 1:-1, 1:-1])
-        #with open('sv-ring-soliton-tn.npy', 'wb') as f:
-        #    np.save(f, solver.tn.detach().numpy()) 
+        ## data saved when calling without animation
+        #with open('sv-analytical-soliton.npy', 'wb') as f:
+        #    np.save(f, data[:, 1:-1, 1:-1])
+        #    np.save(f, vs[:, 1:-1, 1:-1])
+        ##with open('sv-ring-soliton-tn.npy', 'wb') as f:
+        ##    np.save(f, solver.tn.detach().numpy()) 
