@@ -367,6 +367,8 @@ class SineGordonIntegrator:
         self.v[-1] = self.v[-2]
 
     def evolve_energy_conserving(self):
+        # might be off due to the nature of the FDM-no-matrix-operators
+        # formulation :(
         def f(x):
             return torch.sin(x)
         # Marazzato et al.
@@ -378,31 +380,81 @@ class SineGordonIntegrator:
 
         dt = self.dt
 
-        vhalf = v0 + .5 * dt * (self.lapl(u0) - torch.sin(u0))
+        # follow paper implementation
+        vhalf = v0 #+ .5 * dt * (self.lapl(u0) - torch.sin(u0))
 
         def free_flight(u, t, tf, vhalf):
-            return u + (tf - t) * vhalf
+            un = u + (tf - t) * vhalf
+            return self.lapl(un) - torch.sin(un)
 
+        from scipy import special
         def integrate(u, ti, tf, vhalf, n=10):
+            # Gauss-Legendre does not yet do the trick unfortunately
             vals = torch.zeros(n, u.shape[0], u.shape[1])
-            dtt = (tf - ti) / n # != dt in usual program!
+            dtt = (tf - ti) / n # != dt in usual program! 
+            qp, weights = special.roots_legendre(n)
+            weights /= weights.sum()
             for k in range(n):
-                vals[k] = (1/n) * free_flight(u, ti + dtt * k, tf, vhalf) 
+                vals[k] = weights[k] * free_flight(u, ti + dtt * qp[k], tf, vhalf) 
             return torch.sum(vals, axis=0)
 
-        for i, t in tqdm(enumerate((self.tn))):
-            if i == 0: continue # we already initialized u0, v0
-            un, vn = self.u[i-1], self.v[i-1]
+        def integrate_exp(u, ti, tf, vhalf, n=10): 
+            vals = torch.zeros(n, u.shape[0], u.shape[1])
+            dtt = (tf - ti) / n # != dt in usual program! 
+            xn = torch.linspace(0, 1, n)
+            weights = torch.exp(-.1 * xn ** 2)
+            for k in range(n):
+                vals[k] = weights[k] * free_flight(u, ti + dtt * xn[k], tf, vhalf) 
+            return torch.sum(vals, axis=0)
 
-            vhalf_old = vhalf 
-            vhalf = vhalf_old - 2 * dt * integrate(un, (i-1) * dt, i * dt, vhalf)
-            self.u[i] = un + dt * vhalf 
-           
+        def integrate_mid(u, ti, tf, vhalf):
+            vals = torch.zeros(2, u.shape[0], u.shape[1])
+            dtt = (tf + ti) / 2
+            force = free_flight(u, ti, dtt, vhalf) 
+            return dtt * force
+        
+        for i, t in (enumerate(tqdm(self.tn))):
+            if i == 0: continue # we already initialized u0, v0
+            un = self.u[i-1] 
+            self.u[i] = un + dt * vhalf
+
+            vhalf = vhalf - 2 * integrate_mid(un, 0, 2 * dt, vhalf) 
+
+
         for i in range(1, self.nt - 1):
             self.v[i] = (self.u[i+1] - self.u[i-1]) / (2 * dt) 
         self.v[-1] = self.v[-2]
 
+    def evolve_rk4(self,):
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0)
+    
+        self.u[0] = u0
+        self.v[0] = v0
+    
+        dt = self.dt
 
+        for i, t in enumerate(tqdm(self.tn)):
+            if i == 0: continue # we already initialized u0, v0
+            u, v = self.u[i - 1], self.v[i - 1]
+
+            k1_v = dt * (self.lapl(u) - torch.sin(u))
+            k2_v = dt * (self.lapl(u + 0.5 * dt * v) - torch.sin(u + 0.5 * dt * v))
+            k3_v = dt * (self.lapl(u + 0.5 * dt * (v + 0.5 * k1_v)) - torch.sin(u + 0.5 * dt * (v + 0.5 * k1_v)))
+            k4_v = dt * (self.lapl(u + dt * (v + k3_v)) - torch.sin(u + dt * (v + k3_v)))
+            
+            k1_u = dt * v
+            k2_u = dt * (v + 0.5 * k1_v)
+            k3_u = dt * (v + 0.5 * k2_v)
+            k4_u = dt * (v + k3_v)
+
+            un = u + (1/6) * (k1_u + 2 * k2_u + 2 * k3_u + k4_u)
+            vn = v + (1/6) * (k1_v + 2 * k2_v + 2 * k3_v + k4_v)
+
+            self.u[i] = un
+            self.v[i] = vn
+
+        
     def stormer_verlet_filter(self, u, v, dt, t, i, omega):
         def f(u):
             return torch.sin(u)
@@ -797,9 +849,10 @@ if __name__ == '__main__':
     solver = SineGordonIntegrator(-L, L, -L, L, T, nt, nx, ny, device)
    
     #solver.evolve()
+    solver.evolve_rk4()
     #solver.evolve_filter()
     #solver.evolve_ETD1_sparse() 
-    solver.evolve_energy_conserving()
+    #solver.evolve_energy_conserving()
     #solver.evolve_gautschi_lf()
     X, Y = solver.X.cpu().numpy(), solver.Y.cpu().numpy()
     data = solver.u.cpu().numpy() if isinstance(solver.u, torch.Tensor) else solver.u
