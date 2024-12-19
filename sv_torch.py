@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -270,39 +271,8 @@ class SineGordonIntegrator:
         self.apply_neumann_boundary(u_n, v_n)
         #apply_boundary_condition(u_n, v_n, t)
         return u_n, v_n 
-    def pseudo_stormer_verlet_step(self, u, v, dt, t, i):
-        def apply_boundary_condition(u, v, t):
-            dx = abs(self.xmax - self.xmin) / (self.nx - 1)
-            dy = abs(self.ymax - self.ymin) / (self.ny - 1)
-            dt = self.dt
 
-            xm, xM = torch.tensor(self.xmin, dtype=torch.float64), torch.tensor(self.xmax, dtype=torch.float64)
-            ym, yM = torch.tensor(self.ymin, dtype=torch.float64), torch.tensor(self.ymax, dtype=torch.float64)
-   
-            # u's ghost cells get approximation following boundary condition
-            u[0,  1:-1] = u[1, 1:-1] - dx * boundary_x(xm, self.yn[1:-1], t)
-            u[-1, 1:-1] = u[-2, 1:-1] + dx * boundary_x(xM, self.yn[1:-1], t)
-            
-            u[1:-1,  0] = u[1:-1, 1] - dy * boundary_y(self.xn[1:-1], ym, t)
-            u[1:-1, -1] = u[1:-1, -2] + dy * boundary_y(self.xn[1:-1], yM, t)
-            
-            u[0, 0] = (u[1, 0] + u[0, 1])/2 - dx*boundary_x(xm, ym, t)/2 \
-                      - dy*boundary_y(xm, ym, t)/2
-            u[-1, 0] = (u[-2, 0] + u[-1, 1])/2 + dx*boundary_x(xM, ym, t)/2 \
-                       - dy*boundary_y(xM, ym, t)/2
-            u[0, -1] = (u[1, -1] + u[0, -2])/2 - dx*boundary_x(xm, yM, t)/2 \
-                       + dy*boundary_y(xm, yM, t)/2
-            u[-1, -1] = (u[-2, -1] + u[-1, -2])/2 + dx*boundary_x(xM, yM, t)/2 \
-                        + dy*boundary_y(xM, yM, t)/2
-            
-            # v get the hard boundary condition
-            v[0, 1:-1]  = boundary_x(xm, self.yn[1:-1], t)
-            v[-1, 1:-1] = boundary_x(xM, self.yn[1:-1], t)
-            v[1:-1, 0]  = boundary_y(self.xn[1:-1], ym, t)
-            v[1:-1, -1] = boundary_y(self.xn[1:-1], yM, t)
-    
-    
-    
+    def pseudo_stormer_verlet_step(self, u, v, dt, t, i):     
         def f(x):
             # sine-Gordon
             return torch.sin(x)
@@ -325,6 +295,73 @@ class SineGordonIntegrator:
 
         return u_n, v_n
 
+    def step_stormer_verlet_conv2d(self):
+        #def conv2d(u, Lmin, Lmax,):
+        #    def get_stencil(nx, ny, dx, dy, device='cpu'):
+        #        stencil = torch.zeros((1, 1, 3, 3), dtype=torch.float64, device=device)
+        #        stencil[0, 0, 1, 0] = 1.0/dy**2
+        #        stencil[0, 0, 0, 1] = 1.0/dx**2
+        #        stencil[0, 0, 1, 1] = -2.0/dx**2 - 2.0/dy**2
+        #        stencil[0, 0, 2, 1] = 1.0/dx**2
+        #        stencil[0, 0, 1, 2] = 1.0/dy**2
+        #        return stencil
+        #    dx = abs(Lmax - Lmin) / (u.shape[0] - 1)
+        #    dy = abs(Lmax - Lmin) / (u.shape[1] - 1)
+
+        #    s = get_stencil(u.shape[0], u.shape[1], dx, dy)
+
+        #    u_pad = F.pad(u.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode='constant')
+        #    return F.conv2d(u_pad, s, padding=0).squeeze()
+
+        def get_stencil(device='cpu'):
+            stencil = torch.zeros((1, 1, 3, 3), dtype=torch.float64, device=device)
+            stencil[0, 0, 1, 0] = 1.0/self.dy**2
+            stencil[0, 0, 0, 1] = 1.0/self.dx**2
+            stencil[0, 0, 1, 1] = -(2.0/self.dx**2 + 2.0/self.dy**2)
+            stencil[0, 0, 2, 1] = 1.0/self.dx**2
+            stencil[0, 0, 1, 2] = 1.0/self.dy**2
+            return stencil
+
+        def f(x):
+            # sine-Gordon
+            return torch.sin(x)
+            
+            ## Klein-Gordon
+            #return x + x ** 3
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0) 
+        self.u[0] = u0
+        self.v[0] = v0
+        s = get_stencil()
+        dt = self.dt
+
+        laplacian_kernel = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float64)
+        laplacian_kernel = laplacian_kernel.unsqueeze(0).unsqueeze(0) 
+        for i, t in enumerate(tqdm(self.tn)):
+            if i == 0: continue # we already initialized u0, v0
+            if i == 1:
+                v = torch.zeros_like(u0)
+                u_n = u0 + dt * v + 0.5 * dt ** 2 * (self.lapl(u0) - f(u0))
+                self.apply_neumann_boundary(u_n, v)
+                continue
+            u, v = self.u[i - 1], self.v[i - 1]
+            
+            # this loop is still broken but once corrected might become much better than
+            # the hand-rolled global convolution!
+            u_padded = F.pad(u[1:-1, 1:-1].unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode='reflect')
+            un = u.clone()
+            un[1:-1, 1:-1] = F.conv2d(u_padded, laplacian_kernel).squeeze(0).squeeze(0)
+            un = un - torch.sin(u)
+            un = 2 * u - self.u[i - 2] + dt * un
+             
+            self.apply_neumann_boundary(un, un) 
+            self.u[i] = un
+            vn = (self.u[i] - self.u[i-1]) / dt
+            self.v[i] = vn
+             
+
+
+
     def apply_neumann_boundary(self, u, v):
         # Boundary conditions similar to NumPy version
         u[0,  1:-1] = u[1, 1:-1]
@@ -339,14 +376,14 @@ class SineGordonIntegrator:
 
     def evolve_pseudo(self):
         u0 = self.initial_u_grf(self.X, self.Y)
-        v0 = torch.zeros_like(u0)
-    
+        v0 = torch.zeros_like(u0) 
         self.u[0] = u0
         self.v[0] = v0
         for i, t in enumerate(tqdm(self.tn)):
             if i == 0: continue # we already initialized u0, v0
-            self.u[i], self.v[i] = self.stormer_verlet_step(
+            self.u[i], self.v[i] = self.pseudo_stormer_verlet_step(
                 self.u[i-1], self.v[i-1], self.dt, t, i)
+
          
 
     def evolve(self):
@@ -434,14 +471,17 @@ class SineGordonIntegrator:
     
         dt = self.dt
 
+        def f(x):
+            return self.lapl(x) - torch.sin(x)
+
         for i, t in enumerate(tqdm(self.tn)):
             if i == 0: continue # we already initialized u0, v0
             u, v = self.u[i - 1], self.v[i - 1]
 
-            k1_v = dt * (self.lapl(u) - torch.sin(u))
-            k2_v = dt * (self.lapl(u + 0.5 * dt * v) - torch.sin(u + 0.5 * dt * v))
-            k3_v = dt * (self.lapl(u + 0.5 * dt * (v + 0.5 * k1_v)) - torch.sin(u + 0.5 * dt * (v + 0.5 * k1_v)))
-            k4_v = dt * (self.lapl(u + dt * (v + k3_v)) - torch.sin(u + dt * (v + k3_v)))
+            k1_v = dt * f(u) 
+            k2_v = dt * f(u + 0.5 * dt * v)  
+            k3_v = dt * f(u + 0.5 * dt * (v + 0.5 * k1_v)) 
+            k4_v = dt * f(u + dt * (v + k3_v)) 
             
             k1_u = dt * v
             k2_u = dt * (v + 0.5 * k1_v)
@@ -497,11 +537,20 @@ class SineGordonIntegrator:
         # ETD1
         show_matrix_structure = False
         def f(x):
-            # sine-Gordon
-            return -np.sin(x)
+            if isinstance(x, np.ndarray):
+                # sine-Gordon
+                return -np.sin(x)
 
-            ## Klein-Gordon
-            #return x + x ** 3
+                ## Klein-Gordon
+                #return x + x ** 3
+            elif isinstance(x, torch.Tensor):
+                # sine-Gordon
+                return -torch.sin(x)
+
+                ## Klein-Gordon
+                #return x + x ** 3
+            else:
+                raise Exception
 
         u0 = self.initial_u_grf(self.X, self.Y)
         v0 = torch.zeros_like(u0)
@@ -509,6 +558,8 @@ class SineGordonIntegrator:
         self.u[0] = u0
         self.v[0] = v0
         
+        nx = self.nx - 2 
+        ny = self.ny - 2
         dt = self.dt
         def textbook_laplacian(nx, ny,):
             assert nx == ny
@@ -564,35 +615,246 @@ class SineGordonIntegrator:
         L = sp.vstack([L_top_row, L_bottom_row]).tocsc()
         Id_sparse = diags( [np.ones((L.shape[0]),)], [0,], shape=(L.shape)).tocsc()
         L_inv = sp.linalg.spsolve(L, Id_sparse).tocsc()
+ 
+        expon = torch.tensor(sp.linalg.expm(self.dt * L).todense(), dtype=torch.float64)
+        #propagator = torch.tensor(L_inv.todense()) @ (expon - torch.tensor(Id_sparse.todense()))
+        #propagator_x = L_inv @ expon @ x - L_inv @ x
+        #propagator_x = L_inv @ (expon @ x - x)
 
-        expon = sp.linalg.expm(self.dt * L).tocsc()
-        propagator = L_inv @ (expon - Id_sparse).tocsc()
-
+        def expon_mult(x, dt=dt, L=L):
+            return (sp.linalg.expm_multiply(dt * L, x))
 
         self.u = self.u.cpu().numpy() 
         self.v = self.v.cpu().numpy()
-
-        ## _really_ crude approximation; not at all useful long-term
-        #expon = diags([
-        #    expon.diagonal(0), expon.diagonal(-1), expon.diagonal(1)
-        #    ], [0, -1, 1]).tocsc()
-
-        #propagator = diags([
-        #    propagator.diagonal(0), propagator.diagonal(-1), propagator.diagonal(1)
-        #    ], [0, -1, 1]).tocsc()
-
+        # dense MMM loop
         for i in tqdm(range(1, self.nt)):
             u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
             uv    = np.concat([u, v],)
-            gamma = np.concat([np.zeros_like(u), f(u)],)
-
-            u_vec = expon.dot(uv) + propagator.dot(gamma)
+            gamma = np.concat([np.zeros_like(u), -np.sin(u)],)
+            u_vec = expon_mult(uv) + L_inv @ (expon_mult(gamma) - gamma)
 
             un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
             vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
             self.apply_neumann_boundary(un, vn)
 
             self.u[i], self.v[i] = un, vn
+
+        #self.u = self.u.cpu().numpy() 
+        #self.v = self.v.cpu().numpy()
+
+        ### _really_ crude approximation; not at all useful long-term
+        ##expon = diags([
+        ##    expon.diagonal(0), expon.diagonal(-1), expon.diagonal(1)
+        ##    ], [0, -1, 1]).tocsc()
+
+        ##propagator = diags([
+        ##    propagator.diagonal(0), propagator.diagonal(-1), propagator.diagonal(1)
+        ##    ], [0, -1, 1]).tocsc()
+
+        #for i in tqdm(range(1, self.nt)):
+        #    u, v = self.u[i - 1].ravel(), self.v[i - 1].ravel()
+        #    uv    = np.concat([u, v],)
+        #    gamma = np.concat([np.zeros_like(u), f(u)],)
+
+        #    u_vec = expon.dot(uv) + propagator.dot(gamma)
+
+        #    un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+        #    vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+        #    self.apply_neumann_boundary(un, vn)
+
+        #    self.u[i], self.v[i] = un, vn
+
+    def evolve_eec(self):
+        # this one diverges, needs fixing
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0) 
+        self.u[0] = u0
+        self.v[0] = v0
+
+        psi = torch.zeros_like(u0)
+        dt = self.dt
+        for i in tqdm(range(self.nt)):
+            if i == 0: continue
+            u, v = self.u[i-1], self.v[i-1]
+            g = torch.sin(u)
+            u_next = u + dt * v
+            psi_next = psi + 0.5 * g * (u_next - u)
+            v_next = v - 0.5 * dt * (g * (psi_next + psi) - self.lapl(u))
+            self.apply_neumann_boundary(u_next, v_next)
+            self.u[i], self.v[i] = u_next, v_next
+            psi = psi_next 
+
+    def evolve_symplectic_euler(self):
+        # this one diverges, needs fixing
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0) 
+        self.u[0] = u0
+        self.v[0] = v0
+
+        dt = self.dt
+        for i in tqdm(range(self.nt)):
+            if i == 0: continue
+            u, v = self.u[i-1], self.v[i-1]
+            un = u + dt * v
+            vn = v + dt * (self.lapl(un) - torch.sin(un)) 
+            self.apply_neumann_boundary(un, vn)
+            self.u[i], self.v[i] = un, vn
+
+    def evolve_gl(self):
+        # this one diverges, needs fixing
+        u0 = self.initial_u_grf(self.X, self.Y)
+        v0 = torch.zeros_like(u0) 
+        self.u[0] = u0
+        self.v[0] = v0
+
+        dt = self.dt
+        b1 = b2 = .5
+
+        a11 = a22 = .25
+        a12 = a21 = .25 - np.sqrt(3) / 6
+
+        def fixed_point_solve(u, v, dt, stencil=self.lapl, tol=1e-10, max_iter=100): 
+            device = u.device
+            nx, ny = u.shape
+
+            a11 = a22 = 0.25
+            a12 = a21 = 0.25 - (3.0**0.5)/6
+            b1 = b2 = 0.5
+
+            k1u = v.clone()
+            k1v = self.lapl(u) - torch.sin(u)
+            k2u = v.clone()
+            k2v = k1v.clone()
+
+            # this fix point iteration does not take into account the 
+            # boundary conditions nicely
+            for i in range(max_iter):
+                k1u_old = k1u.clone()
+                k1v_old = k1v.clone()
+                k2u_old = k2u.clone()
+                k2v_old = k2v.clone()
+                u1 = u + dt * (a11 * k1u + a12 * k2u)
+                u2 = u + dt * (a21 * k1u + a22 * k2u)
+                k1v = self.lapl(u1) - torch.sin(u1)
+                k2v = self.lapl(u2) - torch.sin(u2)
+                self.apply_neumann_boundary(k1v, k2v)
+                k1u = v + dt * (a11 * k1v + a12 * k2v)
+                k2u = v + dt * (a21 * k1v + a22 * k2v)
+                err = np.sum([
+                    torch.sum(torch.abs(k1u - k1u_old)**2),
+                    torch.sum(torch.abs(k1v - k1v_old)**2),
+                    torch.sum(torch.abs(k2u - k2u_old)**2),
+                    torch.sum(torch.abs(k2v - k2v_old)**2)
+                    ])
+
+                if err < tol:
+                    break
+            u_new = u + dt * (b1 * k1u + b2 * k2u)
+            v_new = v + dt * (b1 * k1v + b2 * k2v)
+            return u_new, v_new
+
+        def fixed_point_matrix_free(u, v, dt, tol=1e-7, max_iter=10, krylov_tol=1e-6, krylov_max_iter=10):
+            device = u.device
+            nx, ny = u.shape
+            a11 = a22 = 1/4
+            a12 = a21 = 1/4 - torch.sqrt(torch.tensor(3.0)) / 6
+            b1 = b2 = 1/2
+            k1u = v.clone()
+            k1v = self.lapl(u) - torch.sin(u)
+            k2u = k1u.clone()
+            k2v = k1v.clone()
+
+            def error(k1u, k2u, k1v, k2v):
+                u1 = u + dt * (a11 * k1u + a12 * k2u)
+                u2 = u + dt * (a21 * k1u + a22 * k2u)
+
+                err_k1u = k1u - (v + dt * (a11 * k1v + a12 * k2v))
+                err_k2u = k2u - (v + dt * (a21 * k1v + a22 * k2v))
+                err_k1v = k1v - (self.lapl(u1) - torch.sin(u1))
+                err_k2v = k2v - (self.lapl(u2) - torch.sin(u2))
+
+                return torch.cat([err_k1u.flatten(), err_k2u.flatten(), 
+                                  err_k1v.flatten(), err_k2v.flatten()])
+
+            def jacobian_action(v_vec, k1u, k2u, k1v, k2v):
+                d = nx * ny
+                v1u = v_vec[:d].view(nx, ny)
+                v2u = v_vec[d:2*d].view(nx, ny)
+                v1v = v_vec[2*d:3*d].view(nx, ny)
+                v2v = v_vec[3*d:].view(nx, ny)
+
+                u1 = u + dt * (a11 * k1u + a12 * k2u)
+                u2 = u + dt * (a21 * k1u + a22 * k2u)
+
+                lap_v1u = self.lapl(v1u)
+                lap_v2u = self.lapl(v2u)
+
+                jv1u = v1u - dt * (a11 * v1v + a12 * v2v)
+                jv2u = v2u - dt * (a21 * v1v + a22 * v2v)
+                jv1v = v1v - (lap_v1u - torch.cos(u1) * v1u)
+                jv2v = v2v - (lap_v2u - torch.cos(u2) * v2u)
+
+                return torch.cat([jv1u.flatten(), jv2u.flatten(), 
+                                  jv1v.flatten(), jv2v.flatten()])
+
+            for iteration in range(max_iter):
+                er = error(k1u, k2u, k1v, k2v)
+                err_norm = torch.norm(er)
+
+                if err_norm < tol:
+                    break
+
+                def matvec(v):
+                    return jacobian_action(v, k1u, k2u, k1v, k2v)
+                delta, _ = conjugate_gradient(matvec, -er, krylov_tol, krylov_max_iter)
+                delta_k1u = delta[:nx * ny].view(nx, ny)
+                delta_k2u = delta[nx * ny:2 * nx * ny].view(nx, ny)
+                delta_k1v = delta[2 * nx * ny:3 * nx * ny].view(nx, ny)
+                delta_k2v = delta[3 * nx * ny:].view(nx, ny)
+                k1u = k1u + delta_k1u
+                k2u = k2u + delta_k2u
+                k1v = k1v + delta_k1v
+                k2v = k2v + delta_k2v
+
+            if err_norm > tol:
+                raise RuntimeError(f"Newton iteration did not converge in {max_iter} iterations.")
+            u_new = u + dt * (b1 * k1u + b2 * k2u)
+            v_new = v + dt * (b1 * k1v + b2 * k2v)
+            return u_new, v_new
+
+        def conjugate_gradient(matvec, b, tol, max_iter):
+            x = torch.zeros_like(b)
+            r = b.clone()
+            p = r.clone()
+            rsold = torch.dot(r, r)
+            for i in (range(max_iter)):
+                Ap = matvec(p)
+                alpha = rsold / torch.dot(p, Ap)
+                x = x + alpha * p
+                r = r - alpha * Ap
+                rsnew = torch.dot(r, r)
+                if torch.sqrt(rsnew) < tol:
+                    break
+                p = r + (rsnew / rsold) * p
+                rsold = rsnew
+            return x, i
+
+        e0 = calculate_energy(u0.cpu().numpy(), v0.cpu().numpy(), self.nx, self.ny, self.dx, self.dy)
+        for i in tqdm(range(self.nt)):
+            if i == 0: continue
+            u, v = self.u[i-1], self.v[i-1]
+
+            un, vn = fixed_point_solve(u, v, dt) 
+            #un, vn = fixed_point_matrix_free(u, v, dt)
+
+            self.apply_neumann_boundary(un, vn)
+            self.u[i], self.v[i] = un, vn
+            E = calculate_energy(un.cpu().numpy(), vn.cpu().numpy(), self.nx-2, self.ny-2, self.dx, self.dy) 
+            if E <= .5 * e0 or E >= 2 * e0:
+                print(f"Aborting time stepping at {i}")
+                self.u[i:] = self.v[i:] = torch.nan
+                break
+
 
     def evolve_ETD1(self):
         # ETD1
@@ -834,12 +1096,60 @@ def topological_charge(u, dx):
     topological_charge = (1 / (2 * np.pi)) * u_x[:, 1] * dx
     return np.sum(topological_charge)
 
+def compare_energy_all():
+    L, T, nt, nx, ny, device = 4, 1., 100, 30, 30,'cpu'
+    dx = 2 * L / (nx + 1)
+    dy = 2 * L / (ny + 1)
+    assert (T / nt) / ((L) ** 2 / (dx * dy)) < 1 
+    dt = T / nt
+    solver = SineGordonIntegrator(-L, L, -L, L, T, nt, nx, ny, device)
+
+    print(f"Allocating {2 * 3 * np.prod(solver.u.shape) / (1<<30)=:.2f} GB") 
+
+    def read_data(solver):
+        data_u = solver.u.cpu().numpy() if isinstance(solver.u, torch.Tensor) else solver.u
+        data_v = solver.v.cpu().numpy() if isinstance(solver.v, torch.Tensor) else solver.v
+        return data_u, data_v
+
+    solver.evolve()
+    u, v = read_data(solver)
+    solver.u = torch.zeros_like(torch.tensor(u))
+    solver.v = torch.zeros_like(torch.tensor(v))
+    solver.evolve_rk4()
+    u_rk4, v_rk4 = read_data(solver)
+    solver.u = torch.zeros_like(torch.tensor(u))
+    solver.v = torch.zeros_like(torch.tensor(v))
+
+    #solver.evolve_ETD1_sparse()
+    #u_etd1, v_etd1 = read_data(solver)
+    #solver.u = torch.zeros_like(torch.tensor(u))
+    #solver.v = torch.zeros_like(torch.tensor(v))
+
+    solver.step_stormer_verlet_conv2d()
+    u_ps, v_ps = read_data(solver)
+    solver.u = torch.zeros_like(torch.tensor(u))
+    solver.v = torch.zeros_like(torch.tensor(v))
+
+    us = np.array([u, u_rk4, u_ps])
+    vs = np.array([v, v_rk4, v_ps])
+
+    for i, nme in enumerate(["Stormer-Verlet", "RK-4", "Stormer-Verlet Conv2d"]):
+        es = [calculate_energy(u, v, nx, ny, dx, dy) for u, v in zip(us[i], vs[i])]
+        plt.plot(np.linspace(0, solver.T, nt), np.array(es), label=nme) 
+    plt.legend()
+    plt.show()
+
 if __name__ == '__main__':
+    compare_energy_all()
+
+
+
+if __name__ == None:
     from matplotlib.animation import FuncAnimation
     from mpl_toolkits.mplot3d import Axes3D
     from sys import argv
 
-    L, T, nt, nx, ny, device = 12., 10., 500, 35, 35,'cpu'
+    L, T, nt, nx, ny, device = 12, 1., 50, 32, 32,'cpu'
     dx = 2 * L / (nx + 1)
     dy = 2 * L / (ny + 1)
     assert (T / nt) / ((L) ** 2 / (dx * dy)) < 1 
@@ -848,8 +1158,8 @@ if __name__ == '__main__':
     # initialize with square domain
     solver = SineGordonIntegrator(-L, L, -L, L, T, nt, nx, ny, device)
    
-    #solver.evolve()
-    solver.evolve_rk4()
+    solver.evolve_gl()
+    #solver.evolve_rk4()
     #solver.evolve_filter()
     #solver.evolve_ETD1_sparse() 
     #solver.evolve_energy_conserving()
@@ -889,7 +1199,7 @@ if __name__ == '__main__':
             es.append(
                 calculate_energy(u, v, nx, ny, dx, dy)
                 )
-        plt.plot(es)
+        plt.plot(np.linspace(0, T, len(es)), es)
         plt.title("Energy")
         plt.xlabel("T / [1]")
         plt.ylabel("E / [1]")
