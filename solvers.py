@@ -9,6 +9,189 @@ from dataclasses import dataclass
 from typing import Tuple, List, Optional
 import torch.fft as fft
 
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+def extract_lower_blocks(sparse_matrix, n):
+    """
+    get C and D 2n²×2n² block matrix [[A, B], [C, D]]
+    """
+    N = n**2
+    indices = sparse_matrix.indices()
+    values = sparse_matrix.values()
+
+    mask = indices[0] >= N
+    filtered_indices = indices[:, mask]
+    filtered_values = values[mask]
+
+    mask_B = filtered_indices[0] < N
+    B_indices = filtered_indices[:, mask_B]
+    B_indices[1] -= N
+    B_values = filtered_values[mask_B]
+
+    mask_D = filtered_indices[1] >= N
+    D_indices = filtered_indices[:, mask_D] - N
+    D_values = filtered_values[mask_D]
+
+    B = torch.sparse_coo_tensor(
+        B_indices, B_values,
+        size=(N, N),
+        dtype=sparse_matrix.dtype
+    )
+
+    D = torch.sparse_coo_tensor(
+        D_indices, D_values,
+        size=(N, N),
+        dtype=sparse_matrix.dtype
+    )
+
+    return B, D
+
+@torch.compile
+def arnoldi_iteration_compiled(A, v, k, t):
+    m = A.shape[0]
+    Q = torch.zeros((m, k+1), dtype=A.dtype)
+    H = torch.zeros((k+1, k), dtype=A.dtype)
+    Q[:, 0] = v / torch.norm(v)
+    for j in range(k):
+        w = torch.sparse.mm(A, Q[:, j].unsqueeze(1)).squeeze()
+        for i in range(j+1):
+            H[i, j] = torch.dot(w, Q[:, i])
+            w -= H[i, j] * Q[:, i]
+        if j < k-1:
+            H[j+1, j] = torch.norm(w)
+            if H[j+1, j] > 1e-12:
+                Q[:, j+1] = w / H[j+1, j]
+            else:
+                return Q, H
+    return Q, H
+
+def arnoldi_iteration(A, v, k, t):
+    m = A.shape[0]
+    Q = torch.zeros((m, k+1), dtype=A.dtype)
+    H = torch.zeros((k+1, k), dtype=A.dtype)
+    Q[:, 0] = v / torch.norm(v)
+    for j in range(k):
+        w = torch.sparse.mm(A, Q[:, j].unsqueeze(1)).squeeze()
+        for i in range(j+1):
+            H[i, j] = torch.dot(w, Q[:, i])
+            w -= H[i, j] * Q[:, i]
+        if j < k-1:
+            H[j+1, j] = torch.norm(w)
+            if H[j+1, j] > 1e-12:
+                Q[:, j+1] = w / H[j+1, j]
+            else:
+                return Q, H
+    return Q, H
+
+def expm_multiply(A, v, t, k=30, compiled=False):
+    m = A.shape[0]
+    beta = torch.norm(v)
+    V, H = arnoldi_iteration(A, v/beta, k, t) if not compiled else arnoldi_iteration_compiled(A, v/beta, k, t)
+    tol = 1e-5
+    for k in range(1, k+1 // 2):
+        F = torch.matrix_exp(t * H[:k, :k])
+        w = beta * V[:, :k] @ F[:, 0]
+        error = torch.norm(t * H[k, k-1] * F[k-1, 0])
+        if error < tol:
+            return w
+    return w
+
+
+# this method builds a sparse matrix containing
+# the discretized Laplacian on a square grid
+def build_D2(nx, ny, dx, dy, dtype):
+    assert nx == ny
+    assert dx == dy
+
+    N = (nx + 2) ** 2
+    middle_diag = -4 * torch.ones(nx + 2, dtype=dtype)
+    middle_diag[0] = middle_diag[-1] = -3
+    left_upper_diag = lower_right_diag = middle_diag + torch.ones(nx + 2, dtype=dtype)
+    diag = torch.cat([left_upper_diag] + [middle_diag] * nx + [lower_right_diag])
+
+    offdiag_pos = torch.ones(N - 1, dtype=dtype)
+    inner_outer_identity = torch.ones(N - (nx + 2),  dtype=dtype)
+
+    indices_main = torch.arange(N, dtype=dtype)
+    indices_off1 = torch.arange(1, N, dtype=dtype)
+    indices_off2 = torch.arange(0, N - 1, dtype=dtype)
+
+    row_indices = torch.cat([
+        indices_main, indices_off1, indices_off2,
+        indices_main[:-(nx+2)], indices_main[nx+2:]
+    ])
+
+    col_indices = torch.cat([
+        indices_main, indices_off2, indices_off1,
+        indices_main[nx+2:], indices_main[:-nx-2]
+    ])
+
+    values = torch.cat([
+        diag, offdiag_pos, offdiag_pos,
+        inner_outer_identity, inner_outer_identity
+    ])
+
+    L = torch.sparse_coo_tensor(
+        indices=torch.stack([row_indices, col_indices]),
+        values=values,
+        size=(N, N),
+        dtype=dtype,
+    )
+    L *= (1 / dx) ** 2
+    return L
+
+# this is a bad approximation :(
+def build_D2_inverse(nx, ny, dx, dy, dtype):
+    assert nx == ny
+    assert dx == dy
+    N = (nx + 2) ** 2
+    i = torch.arange(nx + 2, dtype=dtype)
+    j = torch.arange(nx + 2, dtype=dtype)
+    ii, jj = torch.meshgrid(i, j, indexing='ij')
+
+    # ev: lambda_ij = -4 + 2*cos(πi/N) + 2*cos(πj/N)
+    eigenvalues = -4 + 2*torch.cos(torch.pi * ii / (nx + 1)) + 2*torch.cos(torch.pi * jj / (nx + 1))
+    eigenvalues = eigenvalues.reshape(-1)
+    indices_main = torch.arange(N, dtype=torch.int64)
+    epsilon = 1e-10
+    values = 1.0 / (eigenvalues + epsilon) * (dx ** 2)
+    L_inv = torch.sparse_coo_tensor(
+        indices=torch.stack([indices_main, indices_main]),
+        values=values,
+        size=(N, N),
+        dtype=dtype,
+    )
+    return L_inv
+
+def apply_inverse_lapl(u, n, dx):
+    u = u.view(n, n) 
+    kx = torch.fft.fftfreq(n, d=dx) * 2 * np.pi
+    ky = torch.fft.fftfreq(n, d=dx) * 2 * np.pi
+    kx, ky = torch.meshgrid(kx, ky, indexing='ij')
+    k2 = kx**2 + ky**2
+    k2[0, 0] = 1
+    u_hat = torch.fft.fft2(u) 
+    u_hat = u_hat / (-k2)
+    result = torch.fft.ifft2(u_hat).real
+    return result.view(n * n, 1).squeeze() 
+
+
+def sparse_block(block_list, row_offsets, col_offsets, shape):
+    combined_indices, combined_values = [], []
+    for entry, row_offset, col_offset in zip(block_list, row_offsets, col_offsets):
+        if isinstance(entry, int): continue
+        new_entry = entry.clone()
+        new_idx = new_entry.indices()
+        val = new_entry.values()
+        new_idx[0] += row_offset
+        new_idx[1] += col_offset
+        combined_indices.append(new_idx)
+        combined_values.append(val)
+ 
+    combined_indices = torch.cat(combined_indices, dim=1)
+    combined_values  = torch.cat(combined_values)
+    return torch.sparse_coo_tensor(combined_indices, combined_values, size=shape)
 
 #@torch.jit.script
 def u_yy(a, dy):
@@ -160,13 +343,19 @@ class SineGordonIntegrator(torch.nn.Module):
             'stormer-verlet-pseudo': self.stormer_verlet_pseudo_step,
             'gauss-legendre': self.gauss_legendre_step,
             'RK4': self.rk4_step,
-            'ETD1-sparse': None,
-            'ETD1-krylov': None,
+            'ETD1-sparse': self.etd1_sparse_step,
+            'ETD2-sparse': self.etd2_sparse_step,
+            'ETD1-sparse-opt': self.etd1_sparse_opt_step,
+            'ETD1-krylov': self.etd1_krylov_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
             'gauss-legendre': 0,
             'RK4': 0,
+            'ETD1-sparse': None,
+            'ETD2-sparse': None,
+            'ETD1-sparse-opt': None,
+            'ETD1-krylov': None,
         }
 
         implemented_boundary_conditions = {
@@ -245,14 +434,119 @@ class SineGordonIntegrator(torch.nn.Module):
         self.initial_u = initial_u
         self.initial_v = initial_v
 
-        if step_method == 'ETD1-sparse' or step_method == 'ETD1-krylov':
-            # construct all torch.SparseTensor
-            # L, L inverse
-            # special matrices for gamma
-            # use two modes: krylov and approximation until O(t^4)
-            raise Exception
+        #if step_method == 'ETD1-sparse' or step_method == 'ETD1-krylov':
+        """
+        This evolution uses approximations of exp(tau * L) where L is a block-sparse matrix
+        
+             | 0  |  Id | 
+        L =  | -------- |
+             | D2 |   0 |
 
- 
+        where Id is the identity with shape=(self.nx², self.nx²) (we're assuming nx == ny)
+        and D2 is the discretized Laplacian (5-point stencil) of the finite differences
+        method and homogenous von Neumann bounday conditions (no flux conditions).
+
+        Using Taylor expansion one can show that very quickly terms of order O(tau⁴) appear.
+        Assuming tau in the order of 1e-2, one can assume that this approximation should work
+        fairly nicely, as we reach machine precision after that. To be confirmed in numerical
+        experiments.
+
+        Due to the nature of the ETD-1 update step, we can totally avoid computing the inverse
+        of D2, making our lives much easier.
+        """
+        self.D2 = build_D2(nx, ny, self.dx, self.dy, self.dtype).coalesce()
+        self.D4 = torch.sparse.mm(self.D2, self.D2).coalesce()
+        self.D6 = torch.sparse.mm(self.D2, self.D4).coalesce()
+        self.Id = torch.sparse.spdiags(
+                torch.ones( (nx+2) ** 2, dtype=self.dtype),
+                offsets=torch.tensor([0]),
+                shape=((nx+2) ** 2, (nx+2)**2),)
+
+        self.D2_inv = build_D2_inverse(nx, ny, self.dx, self.dy, self.dtype)
+         
+        self.L = sparse_block(
+                [0,
+                    self.Id.to_sparse_coo().coalesce(), self.D2.to_sparse_coo().coalesce(),
+                    0], 
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+
+
+
+        self.L_inv = sparse_block([0, self.D2_inv.to_sparse_coo().coalesce(), self.Id.to_sparse_coo().coalesce(), 0], 
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+
+
+        self.Id = self.Id.coalesce()
+        self.D2 = self.D2.coalesce()
+        self.D4 = self.D4.coalesce()
+        self.D6 = self.D6.coalesce()
+        self.T0 = sparse_block([self.Id, 0, 0, self.Id], row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr() 
+        self.T1 = sparse_block([0, self.dt * self.Id, self.dt * self.D2, 0],
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+        self.T2 = sparse_block([.5 * self.dt ** 2 * self.D2, 0, 0, .5 * self.dt ** 2 * self.D2],
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+        self.T3 = sparse_block([0, (1/6) * self.dt ** 3 * self.D2, (1/6) * self.dt ** 3 * self.D4],
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+        self.T4 = self.dt ** 4 / 24 * sparse_block([self.D4, 0, 0, self.D4],
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+        self.T5 = self.dt ** 5 / 120 * sparse_block([0, self.D4, self.D6, 0],
+                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                ).coalesce().to_sparse_csr()
+
+        self.exp_t_L_approx = self.T0 + self.T1 + self.T2 + self.T3 + self.T4 + self.T5 
+        self.exp_t_L_half_approx = self.T0 + .5 * self.T1 + .5 ** 2 * self.T2 + .5 ** 3 * self.T3 +\
+                .5 ** 4 * self.T4 + .5 ** 5 * self.T5
+
+        self.exp_t_L_no_Id  = self.T1 + self.T2 + self.T3 + self.T4 + self.T5
+
+        self.T = (self.L_inv @ self.exp_t_L_no_Id).to_sparse_coo().coalesce()
+
+        self.T_no_inv =  self.exp_t_L_no_Id.to_sparse_coo().coalesce()
+        self.lower_left_no_inv, self.lower_right_no_inv = extract_lower_blocks(self.T_no_inv, nx + 2)
+        self.lower_left_no_inv = self.lower_left_no_inv.coalesce().to_sparse_csr() 
+        self.lower_right_no_inv = self.lower_right_no_inv.coalesce().to_sparse_csr()
+
+        self.lower_left, self.lower_right = extract_lower_blocks(self.T, nx + 2)
+        self.lower_left = self.lower_left.coalesce().to_sparse_csr()
+        self.lower_right = self.lower_right.coalesce().to_sparse_csr()
+        self.T = self.T.to_sparse_csr()
+
+        self.T_next = self.L_inv @ self.L_inv @ (
+                (self.exp_t_L_no_Id.to_sparse_coo() - self.dt * self.L.to_sparse_coo()).to_sparse_csr()
+                )
+
+        # needed for inverse laplacian
+        self.kx = torch.fft.fftfreq(self.nx, d=self.dx) * 2 * np.pi
+        self.ky = torch.fft.fftfreq(self.nx, d=self.dx) * 2 * np.pi
+        self.kx, ky = torch.meshgrid(self.kx, self.ky, indexing='ij')
+        self.k2 = self.kx**2 + self.ky**2
+        self.k2[0, 0] = 1
+
+
+
     # enable for long time-stepping!
     # TODO benchmark the different variants
     @torch.compile
@@ -294,6 +588,102 @@ class SineGordonIntegrator(torch.nn.Module):
         v[-1, 1:-1] = 0
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
+
+    def eec_sparse_step(self, u, v, last_k, i):
+        def psi(q):
+            return (self.m / self.c2) * torch.sqrt(1 - torch.cos(q)) 
+        pass # TODO
+
+
+
+    def etd1_sparse_step(self, u, v, last_k, i):
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+
+        gamma = torch.cat([torch.zeros_like(u), -self.m * torch.sin(u)])
+        u_vec = self.exp_t_L_approx @ uv +  self.T @ gamma
+
+        #gamma = -self.m * torch.sin(u)
+        #correction = torch.cat(
+        #        [self.lower_left @ gamma, self.lower_right @ gamma]
+        #        )
+        #u_vec = self.exp_t_L_approx @ uv + correction
+        un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+        vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+        return un, vn, []
+
+    def apply_inverse_lapl(self, u, n):
+        u = u.view(n, n)  
+        u_hat = torch.fft.fft2(u) 
+        u_hat = u_hat / (-self.k2)
+        result = torch.fft.ifft2(u_hat).real
+        return result.view(n * n, 1).squeeze()
+
+    def etd1_sparse_opt_step(self, u, v, last_k, i):
+        """
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+        uv_linear_half = self.exp_t_L_half_approx @ uv
+
+        gamma = -self.m * torch.sin(u)
+        nonlinear_correction = torch.cat(
+            [
+                self.apply_inverse_lapl(self.lower_right_no_inv @ gamma, self.nx),
+                self.lower_left_no_inv @ gamma,
+            ]
+        )
+        uv_nonlinear = uv_linear_half + nonlinear_correction
+        uv_final = self.exp_t_L_half_approx @ uv_nonlinear
+        un = uv_final[0:u.shape[0]].reshape((self.nx, self.ny))
+        vn = uv_final[u.shape[0]:].reshape((self.nx, self.ny))
+        return un, vn, []
+        """
+        
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+
+        gamma = -self.m * torch.sin(u)
+        # see the structure of the matrix to be inverted to understand structure here
+        sine_term = torch.cat(
+                    [
+                      self.apply_inverse_lapl(self.lower_right_no_inv @ gamma, self.nx),
+                      self.lower_left_no_inv @ gamma,
+                    ]
+                )
+
+        u_vec = self.exp_t_L_approx @ uv + sine_term
+        un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+        vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+        return un, vn, []
+    
+
+    def etd2_sparse_step(self, u, v, last_k, i):
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+
+        gamma = -self.m * torch.sin(u)
+        correction = torch.cat(
+                [self.lower_left @ gamma, self.lower_right @ gamma]
+                )
+        u_vec = self.exp_t_L_approx @ uv + correction
+        if i > 0 and last_k != []:
+            gamma_prev = last_k[0]
+            # could be optimized as well
+            u_vec += self.T_next @ torch.cat([torch.zeros_like(u), (gamma - gamma_prev)])
+
+        un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+        vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+        return un, vn, [gamma]
+        
+    def etd1_krylov_step(self, u, v, last_k, i):
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+        gamma = torch.cat([torch.zeros_like(u), -self.m * torch.sin(u)])
+        u_vec = expm_multiply(self.L, uv, self.dt, compiled=False) + \
+                self.L_inv @ (expm_multiply(self.L, gamma, self.dt, compiled=False) - gamma)
+        un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+        vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+        return un, vn, []
 
     def stormer_verlet_pseudo_step(self, u, v, last_k, i):
         vn = v + self.dt * self.grad_Vq(u)
@@ -368,18 +758,6 @@ class SineGordonIntegrator(torch.nn.Module):
         vn = v + (1 / 6) * (k1_v + 2 * k2_v + 2 * k3_v + k4_v)
         return un, vn, []
 
-    def etd1_step(self, u, v, i):
-        # TODO: finish implementation of this guy and benchmark!
-        u = u.reshape()
-        v = v.reshape()
-        uv    = torch.cat([u, v],)
-        gamma = torch.cat([torch.zeros_like(u), -torch.sin(u)],)
-        # TODO: the second matmul can be halved: top half of gamma is zeros:
-        # just use right blocks of matrix
-        u_vec = torch.sparse.mm(self.Exp, uv) + torch.sparse.mm(self.Lstar, gamma) 
-        un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
-        vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny)) 
-        return un, vn
         
     def evolve(self,):
         u0 = self.initial_u(self.X, self.Y)
@@ -408,7 +786,6 @@ class SineGordonIntegrator(torch.nn.Module):
                 if E > 2 * E0 or E < .5 * E0:
                     abort = True
                     print("Aborting, energy diverges")
-                    #raise Exception("Method diverged, aborting timestepping")
             if abort:
                 self.u[(i // self.snapshot_frequency):] = torch.nan
                 self.v[(i // self.snapshot_frequency):] = torch.nan
@@ -434,15 +811,18 @@ def animate(X, Y, data, dt, num_snapshots, nt):
     plt.show()
 
 if __name__ == '__main__':
-    L = 50
-    nx = ny = 400
-    T = 200
-    nt = 20000
-    #initial_u = static_breather
-    initial_u = bubble
+    L = 5
+    nx = ny = 256
+    T = 10
+    nt = 1000
+    initial_u = static_breather
+    #initial_u = ring_soliton_center
     initial_v = zero_velocity
     
     implemented_methods = {
+        #'ETD2-sparse': None,
+        'ETD1-sparse-opt': None,
+        #'ETD1-krylov': None,
         'stormer-verlet-pseudo': None,
         #'gauss-legendre': None,
         #'RK4': None,
@@ -464,9 +844,9 @@ if __name__ == '__main__':
                                   device='cpu')
         solver.evolve()
         implemented_methods[method] = solver.u.clone().cpu().numpy()
-        animate(
-                solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
-                solver.u, solver.dt, solver.num_snapshots, solver.nt)
+        #animate(
+        #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
+        #        solver.u, solver.dt, solver.num_snapshots, solver.nt)
 
         
         es = []
