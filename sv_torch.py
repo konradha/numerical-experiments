@@ -1097,7 +1097,7 @@ def topological_charge(u, dx):
     return np.sum(topological_charge)
 
 def compare_energy_all():
-    L, T, nt, nx, ny, device = 4, 1., 100, 30, 30,'cpu'
+    L, T, nt, nx, ny, device = 10, 10., 200, 64, 64,'cpu'
     dx = 2 * L / (nx + 1)
     dy = 2 * L / (ny + 1)
     assert (T / nt) / ((L) ** 2 / (dx * dy)) < 1 
@@ -1139,12 +1139,12 @@ def compare_energy_all():
     plt.legend()
     plt.show()
 
-if __name__ == '__main__':
+if __name__ == None:
     compare_energy_all()
 
 
 
-if __name__ == None:
+if __name__ == '__main__':
     from matplotlib.animation import FuncAnimation
     from mpl_toolkits.mplot3d import Axes3D
     from sys import argv
