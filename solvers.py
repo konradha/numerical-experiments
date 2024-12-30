@@ -320,6 +320,9 @@ def bubble(x, y):
 def kink(x, y):
     return 4 * torch.atan(torch.exp( x + y ))
 
+def analytical_kink_solution(x, y, t):
+    return 4 * torch.atan(torch.exp( x + y - t)) 
+
 class SineGordonIntegrator(torch.nn.Module):
     """
     Finite Differences solver for the sine-Gordon equation on a rectangular domain.
@@ -376,7 +379,9 @@ class SineGordonIntegrator(torch.nn.Module):
         }
 
         implemented_boundary_conditions = {
-            'homogeneous-neumann': self.neumann_bc}
+            'homogeneous-neumann': self.neumann_bc,
+            'special-kink-bc': self.special_kink_bc
+            }
 
         if step_method not in implemented_methods.keys():
             raise NotImplemented
@@ -596,7 +601,7 @@ class SineGordonIntegrator(torch.nn.Module):
         integrand = torch.sum((ux2 + uy2) + ut2 + (cos))
         return 0.5 * integrand * self.dx * self.dy
 
-    def neumann_bc(self, u, v):
+    def neumann_bc(self, u, v, i):
         u[0, 1:-1] = u[1, 1:-1]
         u[-1, 1:-1] = u[-2, 1:-1]
         u[:, 0] = u[:, 1]
@@ -606,6 +611,56 @@ class SineGordonIntegrator(torch.nn.Module):
         v[-1, 1:-1] = 0
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
+
+    def special_kink_bc(self, u, v, i):
+        def boundary_x(x, Y, t): 
+            x = float(x) * torch.ones_like(Y)
+            t = t * torch.ones_like(Y)
+            return -4 * torch.exp(x + Y + t) / (torch.exp(2 * t) + torch.exp(2 * x + 2 * Y))
+    
+        def boundary_y(X, y, t):
+            y = float(y) * torch.ones_like(X) 
+            t = t * torch.ones_like(X)
+            return -4 * torch.exp(X + y + t) / (torch.exp(2 * t) + torch.exp(2 * X + 2 * y))
+
+        # TODO figure out correct form to finally compare
+        # precision of all methods!
+        dx = self.dx
+        dy = self.dy
+        dt = self.dt
+        t = i * self.dt
+
+        xm, xM = torch.tensor(self.Lx_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
+        ym, yM = torch.tensor(self.Ly_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
+
+        # u's ghost cells get approximation following boundary condition
+        u[0,  1:-1] = u[1, 1:-1] - dx * boundary_x(xm, self.yn[1:-1], t)
+        u[-1, 1:-1] = u[-2, 1:-1] + dx * boundary_x(xM, self.yn[1:-1], t)
+
+        u[1:-1,  0] = u[1:-1, 1] - dy * boundary_y(self.xn[1:-1], ym, t)
+        u[1:-1, -1] = u[1:-1, -2] + dy * boundary_y(self.xn[1:-1], yM, t)
+
+        #u[0,  1:-1] = u[1, 1:-1] - dy * boundary_y(self.xn[1:-1], ym, t)
+        #u[-1, 1:-1] = u[-2, 1:-1] + dy * boundary_y(self.xn[1:-1], yM, t)
+
+        #u[1:-1,  0] = u[1:-1, 1] - dx * boundary_x(xm, self.yn[1:-1], t)
+        #u[1:-1, -1] = u[1:-1, -2] + dx * boundary_x(xM, self.xn[1:-1], t)
+
+        u[0, 0] = (u[1, 0] + u[0, 1])/2 - dx*boundary_x(xm, ym, t)/2 \
+                  - dy*boundary_y(xm, ym, t)/2
+        u[-1, 0] = (u[-2, 0] + u[-1, 1])/2 + dx*boundary_x(xM, ym, t)/2 \
+                   - dy*boundary_y(xM, ym, t)/2
+        u[0, -1] = (u[1, -1] + u[0, -2])/2 - dx*boundary_x(xm, yM, t)/2 \
+                   + dy*boundary_y(xm, yM, t)/2
+        u[-1, -1] = (u[-2, -1] + u[-1, -2])/2 + dx*boundary_x(xM, yM, t)/2 \
+                    + dy*boundary_y(xM, yM, t)/2
+
+        # v get the hard boundary condition
+        v[0, 1:-1]  = boundary_x(xm, self.yn[1:-1], t)
+        v[-1, 1:-1] = boundary_x(xM, self.yn[1:-1], t)
+        v[1:-1, 0]  = boundary_y(self.xn[1:-1], ym, t)
+        v[1:-1, -1] = boundary_y(self.xn[1:-1], yM, t)
+
 
     def leapfrog_step(self, u, v, last_k, i):
         uhalf = u + .5 * self.dt * v
@@ -624,8 +679,7 @@ class SineGordonIntegrator(torch.nn.Module):
             w = .5 * w
             vn = vn + w * self.dt * self.grad_Vq(un) 
             un = un + w * self.dt * vn
-            self.apply_bc(un, vn)
- 
+            self.apply_bc(un, vn, i) 
         return un, vn, []
 
     def yoshida6_step(self, u, v, last_k, i):
@@ -924,19 +978,19 @@ class SineGordonIntegrator(torch.nn.Module):
             return self.grad_Vq(u)
         k1_v = self.dt * f(u)
         k1_u = self.dt * v
-        self.apply_bc(k1_u, k1_v)
+        #self.apply_bc(k1_u, k1_v, i)
 
         k2_u = self.dt * (v + 0.5 * k1_v)
         k2_v = self.dt * f(u + 0.5 * self.dt * v)
-        self.apply_bc(k2_u, k2_v)
+        #self.apply_bc(k2_u, k2_v, i)
 
         k3_u = self.dt * (v + 0.5 * k2_v)
         k3_v = self.dt * f(u + 0.5 * self.dt * (v + 0.5 * k1_v))
-        self.apply_bc(k3_u, k3_v)
+        #self.apply_bc(k3_u, k3_v, i)
 
         k4_u = self.dt * (v + k3_v)
         k4_v = self.dt * f(u + self.dt * (v + k3_v))
-        self.apply_bc(k4_u, k4_v)
+        #self.apply_bc(k4_u, k4_v, i)
  
         un = u + (1 / 6) * (k1_u + 2 * k2_u + 2 * k3_u + k4_u)
         vn = v + (1 / 6) * (k1_v + 2 * k2_v + 2 * k3_v + k4_v)
@@ -959,7 +1013,7 @@ class SineGordonIntegrator(torch.nn.Module):
             if i == 0:
                 continue  # we already initialized u0, v0
             u, v, last_k = self.step(u, v, last_k, i)
-            self.apply_bc(u, v)
+            self.apply_bc(u, v, i)
 
             if i % self.snapshot_frequency == 0:
                 self.u[i // self.snapshot_frequency] = u
@@ -1014,6 +1068,34 @@ def animate_comparison(X, Y, data, dt, num_snapshots, nt,):
     ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
     plt.show()
 
+def animate_comparison_with_kink_solution(X, Y, data, dt, num_snapshots, nt,): 
+    from matplotlib.animation import FuncAnimation
+
+    k = len(data.keys()) + 1 
+    titles = list(data.keys())
+    values = list(data.values())
+
+    fig, axs = plt.subplots(figsize=(20, 20), ncols=k, subplot_kw={"projection":'3d'})
+
+    freq = nt / num_snapshots
+     
+    def update(frame):
+        axs[0].clear()
+        axs[0].plot_surface(X, Y,
+                analytical_kink_solution(X, Y, freq * dt * frame),
+                cmap='viridis')
+        axs[0].set_title(f"analytical solution, t={(frame * dt * (nt / num_snapshots)):.2f}")
+
+        for i, method_name in enumerate(titles):
+            axs[i+1].clear()
+            axs[i+1].plot_surface(X, Y,
+                    data[method_name][frame],
+                    cmap='viridis')
+            axs[i+1].set_title(f"{method_name}, t={(frame * dt * (nt / num_snapshots)):.2f}")
+    fps = 300
+    ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
+    plt.show()
+
 def plot_phase_diagram_quiver(un, vn, titles): 
     plt.figure(figsize=(8, 6))
     k = len(titles)
@@ -1051,11 +1133,11 @@ def lyapunov_exponent(un, tn, names):
 
 if __name__ == '__main__':
     L = 5
-    nx = ny = 128
+    nx = ny = 64
     T = 10
     nt = 1000
-    initial_u = static_breather
-    #initial_u = ring_soliton_center
+    #initial_u = static_breather
+    initial_u = kink
     initial_v = zero_velocity
     
     implemented_methods = {
@@ -1063,9 +1145,9 @@ if __name__ == '__main__':
         #'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
         #'Strang-split': None,
-        #'Energy-conserving-1': None,
+        'Energy-conserving-1': None,
         'yoshida-4': None,
-        'RK4': None,
+        #'RK4': None,
         'stormer-verlet': None,
         #'gauss-legendre': None,
         'RK4': None,
@@ -1075,6 +1157,7 @@ if __name__ == '__main__':
     for method in implemented_methods.keys():
         solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                   ny, T, nt, initial_u, initial_v, step_method=method,
+                                  boundary_conditions='special-kink-bc',
                                   #c2 = lambda X, Y: .1 * torch.exp(-(X ** 2 + Y ** 2)),
                                   #c2 = lambda X, Y: torch.exp(-(1/X**2 + 1/Y**2)),
                                   snapshot_frequency=10,
@@ -1108,8 +1191,10 @@ if __name__ == '__main__':
     plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
     lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
 
-    animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
+    animate_comparison_with_kink_solution(solver.X, solver.Y, implemented_methods, solver.dt,
             solver.num_snapshots, solver.nt,)
+    #animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
+    #        solver.num_snapshots, solver.nt,)
 
 
     
