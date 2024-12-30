@@ -320,8 +320,12 @@ def bubble(x, y):
 def kink(x, y):
     return 4 * torch.atan(torch.exp( x + y ))
 
+def kink_start(x, y):
+    return -4 * torch.exp(x + y) / (1 + torch.exp(2*x + 2*y))
+
 def analytical_kink_solution(x, y, t):
     return 4 * torch.atan(torch.exp( x + y - t)) 
+
 
 class SineGordonIntegrator(torch.nn.Module):
     """
@@ -634,11 +638,11 @@ class SineGordonIntegrator(torch.nn.Module):
         ym, yM = torch.tensor(self.Ly_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
 
         # u's ghost cells get approximation following boundary condition
-        u[0,  1:-1] = u[1, 1:-1] - dx * boundary_x(xm, self.yn[1:-1], t)
-        u[-1, 1:-1] = u[-2, 1:-1] + dx * boundary_x(xM, self.yn[1:-1], t)
+        u[0,  1:-1] = u[1, 1:-1] + dx * boundary_x(xm, self.yn[1:-1], t)
+        u[-1, 1:-1] = u[-2, 1:-1] - dx * boundary_x(xM, self.yn[1:-1], t)
 
-        u[1:-1,  0] = u[1:-1, 1] - dy * boundary_y(self.xn[1:-1], ym, t)
-        u[1:-1, -1] = u[1:-1, -2] + dy * boundary_y(self.xn[1:-1], yM, t)
+        u[1:-1,  0] = u[1:-1, 1] + dy * boundary_y(self.xn[1:-1], ym, t)
+        u[1:-1, -1] = u[1:-1, -2] - dy * boundary_y(self.xn[1:-1], yM, t)
 
         #u[0,  1:-1] = u[1, 1:-1] - dy * boundary_y(self.xn[1:-1], ym, t)
         #u[-1, 1:-1] = u[-2, 1:-1] + dy * boundary_y(self.xn[1:-1], yM, t)
@@ -676,10 +680,10 @@ class SineGordonIntegrator(torch.nn.Module):
         un, vn = u, v
         un_prev = u
         for w in weights: 
-            w = .5 * w
+            #w = .5 * w
             vn = vn + w * self.dt * self.grad_Vq(un) 
             un = un + w * self.dt * vn
-            self.apply_bc(un, vn, i) 
+            #self.apply_bc(un, vn, i) 
         return un, vn, []
 
     def yoshida6_step(self, u, v, last_k, i):
@@ -1136,9 +1140,11 @@ if __name__ == '__main__':
     nx = ny = 64
     T = 10
     nt = 1000
-    #initial_u = static_breather
+    #initial_u = static_breather 
+    #initial_v = zero_velocity
+
     initial_u = kink
-    initial_v = zero_velocity
+    initial_v = kink_start
     
     implemented_methods = {
         #'ETD2-sparse': None,
@@ -1148,7 +1154,7 @@ if __name__ == '__main__':
         'Energy-conserving-1': None,
         'yoshida-4': None,
         #'RK4': None,
-        'stormer-verlet': None,
+        'stormer-verlet-pseudo': None,
         #'gauss-legendre': None,
         'RK4': None,
     }
