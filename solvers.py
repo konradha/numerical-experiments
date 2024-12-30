@@ -351,6 +351,10 @@ class SineGordonIntegrator(torch.nn.Module):
             'ETD1-krylov': self.etd1_krylov_step,
             'Energy-conserving-1': self.eec_sparse_step,
             'Strang-split': self.strang_step,
+            'Leap-frog': self.leapfrog_step,
+            'stormer-verlet': self.stormer_verlet_step,
+            'lie-euler': self.lie_euler_step,
+            'yoshida-4': self.yoshida4_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
@@ -363,6 +367,10 @@ class SineGordonIntegrator(torch.nn.Module):
             'ETD1-sparse-opt': None,
             'ETD1-krylov': None,
             'Energy-conserving-1': None,
+            'Leap-frog': None,
+            'stormer-verlet': None,
+            'lie-euler': None,
+            'yoshida-4': None,
         }
 
         implemented_boundary_conditions = {
@@ -596,6 +604,49 @@ class SineGordonIntegrator(torch.nn.Module):
         v[-1, 1:-1] = 0
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
+
+    def leapfrog_step(self, u, v, last_k, i):
+        uhalf = u + .5 * self.dt * v
+        vn = v + self.dt * self.grad_Vq(uhalf)
+        un = uhalf + .5 * self.dt * vn
+        return un, vn, []
+
+    def yoshida4_step(self, u, v, last_k, i):
+        w0 = 1.0/(2.0 - 2.0**(1.0/3.0))
+        w1 = -2.0**(1.0/3.0)/(2.0 - 2.0**(1.0/3.0)) 
+        
+        weights = [w1, w0, w1]
+        un, vn = u, v
+        un_prev = u
+        for w in weights: 
+            w = .5 * w
+            vn = vn + w * self.dt * self.grad_Vq(un) 
+            un = un + w * self.dt * vn
+            self.apply_bc(un, vn)
+ 
+        return un, vn, []
+
+    def lie_euler_step(self, u, v, last_k, i):
+        # Explain: Solution has issues with boundary
+        # -> L probably still ill-formed
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+        uv_new = uv + self.dt * self.L @ uv
+        un = uv_new[:self.nx ** 2].reshape((self.nx, self.nx))
+        v_part = uv_new[self.nx ** 2:].reshape((self.nx, self.nx)) 
+        vn = v_part - self.dt * self.m * torch.sin(un)
+        return un, vn, []
+
+    def stormer_verlet_step(self, u, v, last_k, i):
+        if i == 1:
+            vn = v + self.dt * self.grad_Vq(u)
+            un = u + self.dt * vn
+            return un, vn, [u]
+         
+        u_past = last_k[0]
+        un = 2 * u - u_past + self.dt ** 2 * self.grad_Vq(u) 
+        vn = (un - u) / self.dt
+        return un, vn, [u]
 
     def ieq_step(self, q, p, last_k, i):
         # TODO: understand method fully
@@ -952,11 +1003,13 @@ if __name__ == '__main__':
     
     implemented_methods = {
         #'ETD2-sparse': None,
-        'ETD1-sparse-opt': None,
+        #'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
         #'Strang-split': None,
-        'Energy-conserving-1': None,
-        'stormer-verlet-pseudo': None,
+        #'Energy-conserving-1': None,
+        'yoshida-4': None,
+        'Leap-frog': None,
+        'stormer-verlet': None,
         #'gauss-legendre': None,
         #'RK4': None,
     }
