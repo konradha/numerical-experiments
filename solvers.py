@@ -597,6 +597,21 @@ class SineGordonIntegrator(torch.nn.Module):
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
 
+    def ieq_step(self, q, p, last_k, i):
+        # TODO: understand method fully
+        if i == 0 or i == 1: self.epsilon = 1e-6
+
+        V = self.potential_energy(q)
+        psi = torch.sqrt(2 * V + self.epsilon)
+        g = self.grad_psi(q, psi)
+        p_half = p - 0.5 * self.dt * psi * g
+        q_new = q + self.dt * p_half
+        psi_new = psi + self.dt * g.T @ p_half
+
+        p_new = p_half - 0.5 * self.dt * psi_new * self.grad_psi(q_new, psi_new)
+
+        return q_new, p_new, []
+
 
     def eec_sparse_step(self, u, v, last_k, i):
         # these integral approximations could get some work
@@ -612,13 +627,57 @@ class SineGordonIntegrator(torch.nn.Module):
             force_sum = sum(w * self.grad_Vq(u_free(t * self.dt)) for t, w in zip(points, weights))
             return -self.dt * force_sum
 
+        def integrate_forces_gl(u_free):
+            self.wx = torch.tensor([
+                [0.1527533871307258, 	-0.0765265211334973],
+                [0.1527533871307258,	 0.0765265211334973],
+                [0.1491729864726037,	-0.2277858511416451],
+                [0.1491729864726037,	 0.2277858511416451],
+                [0.1420961093183820,	-0.3737060887154195],
+                [0.1420961093183820,	 0.3737060887154195],
+                [0.1316886384491766,	-0.5108670019508271],
+                [0.1316886384491766,	 0.5108670019508271],
+                [0.1181945319615184,	-0.6360536807265150],
+                [0.1181945319615184,	 0.6360536807265150],
+                [0.1019301198172404,	-0.7463319064601508],
+                [0.1019301198172404,	 0.7463319064601508],
+                [0.0832767415767048,	-0.8391169718222188],
+                [0.0832767415767048,	 0.8391169718222188],
+                [0.0626720483341091,	-0.9122344282513259],
+                [0.0626720483341091,	 0.9122344282513259],
+                [0.0406014298003869,	-0.9639719272779138],
+                [0.0406014298003869,	 0.9639719272779138],
+                [0.0176140071391521,	-0.9931285991850949],
+                [0.0176140071391521,	 0.9931285991850949],
+                ], device=self.device)
+
+            weights = self.wx[:, 0]
+            points = self.wx[:, 1]
+            scaled_points = (points + 1) 
+            force_sum = sum(w * self.grad_Vq(u_free(t * self.dt)) for w, t in zip(weights, scaled_points))
+            return -self.dt * force_sum
+
+        if i == 1:
+            phalf = v 
+        else:
+            phalf = last_k[0]
+ 
+        #u_new = u + self.dt * phalf
+        #u_free = lambda t: u_new + t * phalf
+        #phalf = phalf - 2 * integrate_forces(u_free)
+        #v_new = self.grad_Vq(u_new)
+     
+        #return u_new, v_new, [phalf]
+
         u_free = lambda t: u + t * v
         force_integral = integrate_forces(u_free)
        
-        v_new = v - force_integral
+        # TODO: figure out: according to paper we need factor 2 here?
+        v_new = v -  force_integral
         u_new = u + self.dt * v_new
        
-        return u_new, v_new, []
+        return u_new, v_new, [v_new]
+
 
 
 
@@ -887,8 +946,8 @@ if __name__ == '__main__':
     nx = ny = 128
     T = 10
     nt = 1000
-    #initial_u = static_breather
-    initial_u = ring_soliton_center
+    initial_u = static_breather
+    #initial_u = ring_soliton_center
     initial_v = zero_velocity
     
     implemented_methods = {
@@ -918,18 +977,18 @@ if __name__ == '__main__':
         #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
 
        
-    #    es = []
-    #    for i in range(solver.num_snapshots):
-    #        u, v = solver.u[i], solver.v[i]
-    #        es.append(solver.energy(u, v).cpu().numpy())
+        es = []
+        for i in range(solver.num_snapshots):
+            u, v = solver.u[i], solver.v[i]
+            es.append(solver.energy(u, v).cpu().numpy())
 
-    #    plt.plot(
-    #        solver.tn.cpu().numpy()[
-    #            ::solver.snapshot_frequency][0:len(es)],
-    #        es,
-    #        label=method)         
-    #plt.legend()
-    #plt.show()
+        plt.plot(
+            solver.tn.cpu().numpy()[
+                ::solver.snapshot_frequency][0:len(es)],
+            es,
+            label=method)         
+    plt.legend()
+    plt.show()
 
     animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
             solver.num_snapshots, solver.nt,)
