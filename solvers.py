@@ -1035,6 +1035,20 @@ def plot_phase_diagram_quiver(un, vn, titles):
     plt.grid(True)
     plt.show()
 
+def lyapunov_exponent(un, tn, names):
+    l = len(un)
+
+    for k in range(l): 
+        dx = (un[k][:, 1:, :] - un[k][:, :-1, :])[:, :, 1:]
+        dy = (un[k][:, :, 1:] - un[k][:, :, :-1])[:, 1:, :]
+        delta = np.sqrt(dx**2 + dy**2)
+        delta_avg = np.mean(delta, axis=(1, 2))
+        log_delta = np.log(delta_avg[1:] / delta_avg[0])
+        plt.plot(tn, log_delta, label=names[k])
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
 if __name__ == '__main__':
     L = 5
     nx = ny = 128
@@ -1063,6 +1077,7 @@ if __name__ == '__main__':
                                   ny, T, nt, initial_u, initial_v, step_method=method,
                                   #c2 = lambda X, Y: .1 * torch.exp(-(X ** 2 + Y ** 2)),
                                   #c2 = lambda X, Y: torch.exp(-(1/X**2 + 1/Y**2)),
+                                  snapshot_frequency=10,
                                   c2 = 1,
                                   enable_energy_control=False,
                                   device='cpu')
@@ -1075,6 +1090,7 @@ if __name__ == '__main__':
         u, v = solver.u.clone().cpu().numpy(), solver.v.clone().cpu().numpy()
         u_quiver.append(u)
         v_quiver.append(v)
+
  
         es = []
         for i in range(solver.num_snapshots):
@@ -1090,6 +1106,7 @@ if __name__ == '__main__':
     plt.show()
 
     plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
+    lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
 
     animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
             solver.num_snapshots, solver.nt,)
