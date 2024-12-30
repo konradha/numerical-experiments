@@ -227,7 +227,8 @@ class SolitonParameters:
     phase: torch.Tensor
 
 def ring_soliton(X, Y, xc, yc, R):
-    return 4 * torch.arctan(((X - xc) ** 2 + (X - yc) ** 2 - R ** 2) / (2 * R))
+    return 4 * torch.arctan(((X - xc) ** 2 + (X - yc) ** 2) / (2 * R))
+    #return 4 * torch.arctan(((X - xc) ** 2 + (X - yc) ** 2 - R ** 2) / (2 * R))
 
 def ring_soliton_center(X, Y):
     return ring_soliton(X, Y, 0, 0, 1)
@@ -345,17 +346,23 @@ class SineGordonIntegrator(torch.nn.Module):
             'RK4': self.rk4_step,
             'ETD1-sparse': self.etd1_sparse_step,
             'ETD2-sparse': self.etd2_sparse_step,
+            'ETD2-RK': self.etd2_rk_step,
             'ETD1-sparse-opt': self.etd1_sparse_opt_step,
             'ETD1-krylov': self.etd1_krylov_step,
+            'Energy-conserving-1': self.eec_sparse_step,
+            'Strang-split': self.strang_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
             'gauss-legendre': 0,
             'RK4': 0,
+            'Strang-split': None,
+            'ETD2-RK': None,
             'ETD1-sparse': None,
             'ETD2-sparse': None,
             'ETD1-sparse-opt': None,
             'ETD1-krylov': None,
+            'Energy-conserving-1': None,
         }
 
         implemented_boundary_conditions = {
@@ -521,6 +528,7 @@ class SineGordonIntegrator(torch.nn.Module):
                 .5 ** 4 * self.T4 + .5 ** 5 * self.T5
 
         self.exp_t_L_no_Id  = self.T1 + self.T2 + self.T3 + self.T4 + self.T5
+        self.exp_t_L_no_first_two  = self.T2 + self.T3 + self.T4 + self.T5
 
         self.T = (self.L_inv @ self.exp_t_L_no_Id).to_sparse_coo().coalesce()
 
@@ -589,10 +597,28 @@ class SineGordonIntegrator(torch.nn.Module):
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
 
+
     def eec_sparse_step(self, u, v, last_k, i):
-        def psi(q):
-            return (self.m / self.c2) * torch.sqrt(1 - torch.cos(q)) 
-        pass # TODO
+        # these integral approximations could get some work
+        # currently smoothing out unnecessarily
+        def integrate_forces_mid(u_free):
+            midpoint = u_free(0.5 * self.dt)
+            return -self.dt * self.grad_Vq(midpoint)
+
+        def integrate_forces(u_free):
+            points = [0.5 - np.sqrt(15)/10, 0.5, 0.5 + np.sqrt(15)/10]
+            weights = [5/18, 4/9, 5/18]
+
+            force_sum = sum(w * self.grad_Vq(u_free(t * self.dt)) for t, w in zip(points, weights))
+            return -self.dt * force_sum
+
+        u_free = lambda t: u + t * v
+        force_integral = integrate_forces(u_free)
+       
+        v_new = v - force_integral
+        u_new = u + self.dt * v_new
+       
+        return u_new, v_new, []
 
 
 
@@ -655,7 +681,33 @@ class SineGordonIntegrator(torch.nn.Module):
         un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
         vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
         return un, vn, []
-    
+
+    def etd2_rk_step(self, u, v, last_k, i):        
+        u, v = u.ravel(), v.ravel()
+        uv = torch.cat([u, v])
+        gamma = -self.m * torch.sin(u)
+        # see the structure of the matrix to be inverted to understand structure here
+        sine_term = torch.cat(
+                    [
+                      self.apply_inverse_lapl(self.lower_right_no_inv @ gamma, self.nx),
+                      self.lower_left_no_inv @ gamma,
+                    ]
+                )
+
+        u_vec = self.exp_t_L_approx @ uv + sine_term
+        if i > 0 and last_k != []: 
+            # TODO: see "Exponential Time Differencing for Stiff Systems"
+            pass
+
+        un = u_vec[0:u.shape[0]].reshape((self.nx, self.ny))
+        vn = u_vec[u.shape[0]: ].reshape((self.nx, self.ny))
+        return un, vn, [sine_term]
+
+    def strang_step(self, u, v, last_k, i):
+        vn = (v.reshape((self.nx ** 2)) + 0.5 * self.dt * self.D2 @ u.reshape(self.nx ** 2))    
+        un = u.reshape(self.nx ** 2) + self.dt * vn + .5 * self.dt ** 2 * torch.sin(u.reshape(self.nx ** 2))
+
+        return un.reshape((self.nx,self.nx)), vn.reshape((self.nx,self.nx)), []
 
     def etd2_sparse_step(self, u, v, last_k, i):
         u, v = u.ravel(), v.ravel()
@@ -795,7 +847,7 @@ class SineGordonIntegrator(torch.nn.Module):
         self.u = torch.zeros_like(self.u)
         self.v = torch.zeros_like(self.v)
 
-def animate(X, Y, data, dt, num_snapshots, nt):
+def animate(X, Y, data, dt, num_snapshots, nt, title):
     from matplotlib.animation import FuncAnimation
     fig = plt.figure(figsize=(20, 20))
     ax = fig.add_subplot(111, projection='3d')
@@ -805,35 +857,52 @@ def animate(X, Y, data, dt, num_snapshots, nt):
         ax.plot_surface(X, Y,
                 data[frame],
                 cmap='viridis')
-        ax.set_title(f"t={(frame * dt * (nt / num_snapshots)):.2f}")
+        ax.set_title(f"{title}, t={(frame * dt * (nt / num_snapshots)):.2f}")
+    fps = 300
+    ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
+    plt.show()
+
+def animate_comparison(X, Y, data, dt, num_snapshots, nt,): 
+    from matplotlib.animation import FuncAnimation
+
+    k = len(data.keys())
+    titles = list(data.keys())
+    values = list(data.values())
+
+    fig, axs = plt.subplots(figsize=(20, 20), ncols=k, subplot_kw={"projection":'3d'})
+     
+    def update(frame):
+        for i, method_name in enumerate(titles):
+            axs[i].clear()
+            axs[i].plot_surface(X, Y,
+                    data[method_name][frame],
+                    cmap='viridis')
+            axs[i].set_title(f"{method_name}, t={(frame * dt * (nt / num_snapshots)):.2f}")
     fps = 300
     ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
     plt.show()
 
 if __name__ == '__main__':
     L = 5
-    nx = ny = 256
+    nx = ny = 128
     T = 10
     nt = 1000
-    initial_u = static_breather
-    #initial_u = ring_soliton_center
+    #initial_u = static_breather
+    initial_u = ring_soliton_center
     initial_v = zero_velocity
     
     implemented_methods = {
         #'ETD2-sparse': None,
         'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
+        #'Strang-split': None,
+        'Energy-conserving-1': None,
         'stormer-verlet-pseudo': None,
         #'gauss-legendre': None,
         #'RK4': None,
     }
 
-    #solutions = {
-    #    'stormer-verlet-pseudo': None,
-    #    'gauss-legendre': None,
-    #    'RK4': None,
-
-    #        }
+    
     for method in implemented_methods.keys():
         solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                   ny, T, nt, initial_u, initial_v, step_method=method,
@@ -846,21 +915,26 @@ if __name__ == '__main__':
         implemented_methods[method] = solver.u.clone().cpu().numpy()
         #animate(
         #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
-        #        solver.u, solver.dt, solver.num_snapshots, solver.nt)
+        #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
 
-        
-        es = []
-        for i in range(solver.num_snapshots):
-            u, v = solver.u[i], solver.v[i]
-            es.append(solver.energy(u, v).cpu().numpy())
+       
+    #    es = []
+    #    for i in range(solver.num_snapshots):
+    #        u, v = solver.u[i], solver.v[i]
+    #        es.append(solver.energy(u, v).cpu().numpy())
 
-        plt.plot(
-            solver.tn.cpu().numpy()[
-                ::solver.snapshot_frequency][0:len(es)],
-            es,
-            label=method)         
-    plt.legend()
-    plt.show()
+    #    plt.plot(
+    #        solver.tn.cpu().numpy()[
+    #            ::solver.snapshot_frequency][0:len(es)],
+    #        es,
+    #        label=method)         
+    #plt.legend()
+    #plt.show()
+
+    animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
+            solver.num_snapshots, solver.nt,)
+
+
     
 
     """
