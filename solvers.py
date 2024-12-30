@@ -355,6 +355,7 @@ class SineGordonIntegrator(torch.nn.Module):
             'stormer-verlet': self.stormer_verlet_step,
             'lie-euler': self.lie_euler_step,
             'yoshida-4': self.yoshida4_step,
+            'yoshida-6': self.yoshida6_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
@@ -371,6 +372,7 @@ class SineGordonIntegrator(torch.nn.Module):
             'stormer-verlet': None,
             'lie-euler': None,
             'yoshida-4': None,
+            'yoshida-6': None,
         }
 
         implemented_boundary_conditions = {
@@ -624,6 +626,20 @@ class SineGordonIntegrator(torch.nn.Module):
             un = un + w * self.dt * vn
             self.apply_bc(un, vn)
  
+        return un, vn, []
+
+    def yoshida6_step(self, u, v, last_k, i):
+        w0 = 1.0 / (2.0 - 2.0**(1.0 / 5.0))
+        w1 = -2.0**(1.0 / 5.0) / (2.0 - 2.0**(1.0 / 5.0))
+        w2 = w0
+        weights = [w0, w1, w2, w1, w0]
+
+        un, vn = u.clone(), v.clone()
+        for w in weights:
+            vn = vn + w * self.dt * self.grad_Vq(un)
+            un = un + w * self.dt * vn
+            self.apply_bc(un, vn)
+
         return un, vn, []
 
     def lie_euler_step(self, u, v, last_k, i):
@@ -907,15 +923,21 @@ class SineGordonIntegrator(torch.nn.Module):
         def f(u):
             return self.grad_Vq(u)
         k1_v = self.dt * f(u)
-        k2_v = self.dt * f(u + 0.5 * self.dt * v)
-        k3_v = self.dt * f(u + 0.5 * self.dt * (v + 0.5 * k1_v))
-        k4_v = self.dt * f(u + self.dt * (v + k3_v))
-
         k1_u = self.dt * v
-        k2_u = self.dt * (v + 0.5 * k1_v)
-        k3_u = self.dt * (v + 0.5 * k2_v)
-        k4_u = self.dt * (v + k3_v)
+        self.apply_bc(k1_u, k1_v)
 
+        k2_u = self.dt * (v + 0.5 * k1_v)
+        k2_v = self.dt * f(u + 0.5 * self.dt * v)
+        self.apply_bc(k2_u, k2_v)
+
+        k3_u = self.dt * (v + 0.5 * k2_v)
+        k3_v = self.dt * f(u + 0.5 * self.dt * (v + 0.5 * k1_v))
+        self.apply_bc(k3_u, k3_v)
+
+        k4_u = self.dt * (v + k3_v)
+        k4_v = self.dt * f(u + self.dt * (v + k3_v))
+        self.apply_bc(k4_u, k4_v)
+ 
         un = u + (1 / 6) * (k1_u + 2 * k2_u + 2 * k3_u + k4_u)
         vn = v + (1 / 6) * (k1_v + 2 * k2_v + 2 * k3_v + k4_v)
         return un, vn, []
@@ -992,6 +1014,27 @@ def animate_comparison(X, Y, data, dt, num_snapshots, nt,):
     ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
     plt.show()
 
+def plot_phase_diagram_quiver(un, vn, titles): 
+    plt.figure(figsize=(8, 6))
+    k = len(titles)
+
+    colors = np.random.rand(k, 3)
+    for l in range(k):
+        du_dt = np.gradient(un[l], axis=0)
+        dv_dt = np.gradient(vn[l], axis=0)
+        n = 0#un[0].shape[1] // 2 
+        
+        plt.quiver(un[l][:, n, n], vn[l][:, n, n], du_dt[:, n, n], dv_dt[:, n, n],
+                label=titles[l],
+                color=colors[l],
+                angles='xy', scale_units='xy',  )
+ 
+    plt.xlabel('$u$', fontsize=12)
+    plt.ylabel('$v$', fontsize=12)
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 if __name__ == '__main__':
     L = 5
     nx = ny = 128
@@ -1008,13 +1051,13 @@ if __name__ == '__main__':
         #'Strang-split': None,
         #'Energy-conserving-1': None,
         'yoshida-4': None,
-        'Leap-frog': None,
+        'RK4': None,
         'stormer-verlet': None,
         #'gauss-legendre': None,
-        #'RK4': None,
+        'RK4': None,
     }
 
-    
+    u_quiver, v_quiver = [], [] 
     for method in implemented_methods.keys():
         solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                   ny, T, nt, initial_u, initial_v, step_method=method,
@@ -1029,7 +1072,10 @@ if __name__ == '__main__':
         #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
         #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
 
-       
+        u, v = solver.u.clone().cpu().numpy(), solver.v.clone().cpu().numpy()
+        u_quiver.append(u)
+        v_quiver.append(v)
+ 
         es = []
         for i in range(solver.num_snapshots):
             u, v = solver.u[i], solver.v[i]
@@ -1042,6 +1088,8 @@ if __name__ == '__main__':
             label=method)         
     plt.legend()
     plt.show()
+
+    plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
 
     animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
             solver.num_snapshots, solver.nt,)
