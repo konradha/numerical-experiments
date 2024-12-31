@@ -463,117 +463,117 @@ class SineGordonIntegrator(torch.nn.Module):
         self.initial_u = initial_u
         self.initial_v = initial_v
 
-        #if step_method == 'ETD1-sparse' or step_method == 'ETD1-krylov':
-        """
-        This evolution uses approximations of exp(tau * L) where L is a block-sparse matrix
-        
-             | 0  |  Id | 
-        L =  | -------- |
-             | D2 |   0 |
+        if 'ETD' in step_method:
+            """
+            This evolution uses approximations of exp(tau * L) where L is a block-sparse matrix
+            
+                 | 0  |  Id | 
+            L =  | -------- |
+                 | D2 |   0 |
 
-        where Id is the identity with shape=(self.nx², self.nx²) (we're assuming nx == ny)
-        and D2 is the discretized Laplacian (5-point stencil) of the finite differences
-        method and homogenous von Neumann bounday conditions (no flux conditions).
+            where Id is the identity with shape=(self.nx², self.nx²) (we're assuming nx == ny)
+            and D2 is the discretized Laplacian (5-point stencil) of the finite differences
+            method and homogenous von Neumann bounday conditions (no flux conditions).
 
-        Using Taylor expansion one can show that very quickly terms of order O(tau⁴) appear.
-        Assuming tau in the order of 1e-2, one can assume that this approximation should work
-        fairly nicely, as we reach machine precision after that. To be confirmed in numerical
-        experiments.
+            Using Taylor expansion one can show that very quickly terms of order O(tau⁴) appear.
+            Assuming tau in the order of 1e-2, one can assume that this approximation should work
+            fairly nicely, as we reach machine precision after that. To be confirmed in numerical
+            experiments.
 
-        Due to the nature of the ETD-1 update step, we can totally avoid computing the inverse
-        of D2, making our lives much easier.
-        """
-        self.D2 = build_D2(nx, ny, self.dx, self.dy, self.dtype).coalesce()
-        self.D4 = torch.sparse.mm(self.D2, self.D2).coalesce()
-        self.D6 = torch.sparse.mm(self.D2, self.D4).coalesce()
-        self.Id = torch.sparse.spdiags(
-                torch.ones( (nx+2) ** 2, dtype=self.dtype),
-                offsets=torch.tensor([0]),
-                shape=((nx+2) ** 2, (nx+2)**2),)
+            Due to the nature of the ETD-1 update step, we can totally avoid computing the inverse
+            of D2, making our lives much easier.
+            """
+            self.D2 = build_D2(nx, ny, self.dx, self.dy, self.dtype).coalesce()
+            self.D4 = torch.sparse.mm(self.D2, self.D2).coalesce()
+            self.D6 = torch.sparse.mm(self.D2, self.D4).coalesce()
+            self.Id = torch.sparse.spdiags(
+                    torch.ones( (nx+2) ** 2, dtype=self.dtype),
+                    offsets=torch.tensor([0]),
+                    shape=((nx+2) ** 2, (nx+2)**2),)
 
-        self.D2_inv = build_D2_inverse(nx, ny, self.dx, self.dy, self.dtype)
-         
-        self.L = sparse_block(
-                [0,
-                    self.Id.to_sparse_coo().coalesce(), self.D2.to_sparse_coo().coalesce(),
-                    0], 
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
-
-
-
-        self.L_inv = sparse_block([0, self.D2_inv.to_sparse_coo().coalesce(), self.Id.to_sparse_coo().coalesce(), 0], 
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
+            self.D2_inv = build_D2_inverse(nx, ny, self.dx, self.dy, self.dtype)
+             
+            self.L = sparse_block(
+                    [0,
+                        self.Id.to_sparse_coo().coalesce(), self.D2.to_sparse_coo().coalesce(),
+                        0], 
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
 
 
-        self.Id = self.Id.coalesce()
-        self.D2 = self.D2.coalesce()
-        self.D4 = self.D4.coalesce()
-        self.D6 = self.D6.coalesce()
-        self.T0 = sparse_block([self.Id, 0, 0, self.Id], row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr() 
-        self.T1 = sparse_block([0, self.dt * self.Id, self.dt * self.D2, 0],
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
-        self.T2 = sparse_block([.5 * self.dt ** 2 * self.D2, 0, 0, .5 * self.dt ** 2 * self.D2],
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
-        self.T3 = sparse_block([0, (1/6) * self.dt ** 3 * self.D2, (1/6) * self.dt ** 3 * self.D4],
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
-        self.T4 = self.dt ** 4 / 24 * sparse_block([self.D4, 0, 0, self.D4],
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
-        self.T5 = self.dt ** 5 / 120 * sparse_block([0, self.D4, self.D6, 0],
-                row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
-                col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
-                shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
-                ).coalesce().to_sparse_csr()
 
-        self.exp_t_L_approx = self.T0 + self.T1 + self.T2 + self.T3 + self.T4 + self.T5 
-        self.exp_t_L_half_approx = self.T0 + .5 * self.T1 + .5 ** 2 * self.T2 + .5 ** 3 * self.T3 +\
-                .5 ** 4 * self.T4 + .5 ** 5 * self.T5
+            self.L_inv = sparse_block([0, self.D2_inv.to_sparse_coo().coalesce(), self.Id.to_sparse_coo().coalesce(), 0], 
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
 
-        self.exp_t_L_no_Id  = self.T1 + self.T2 + self.T3 + self.T4 + self.T5
-        self.exp_t_L_no_first_two  = self.T2 + self.T3 + self.T4 + self.T5
 
-        self.T = (self.L_inv @ self.exp_t_L_no_Id).to_sparse_coo().coalesce()
+            self.Id = self.Id.coalesce()
+            self.D2 = self.D2.coalesce()
+            self.D4 = self.D4.coalesce()
+            self.D6 = self.D6.coalesce()
+            self.T0 = sparse_block([self.Id, 0, 0, self.Id], row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr() 
+            self.T1 = sparse_block([0, self.dt * self.Id, self.dt * self.D2, 0],
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
+            self.T2 = sparse_block([.5 * self.dt ** 2 * self.D2, 0, 0, .5 * self.dt ** 2 * self.D2],
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
+            self.T3 = sparse_block([0, (1/6) * self.dt ** 3 * self.D2, (1/6) * self.dt ** 3 * self.D4],
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
+            self.T4 = self.dt ** 4 / 24 * sparse_block([self.D4, 0, 0, self.D4],
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
+            self.T5 = self.dt ** 5 / 120 * sparse_block([0, self.D4, self.D6, 0],
+                    row_offsets = [0, 0, self.nx ** 2, self.nx ** 2],
+                    col_offsets = [0, self.ny ** 2, 0, self.ny ** 2],
+                    shape=(2 * self.nx ** 2, 2 * self.nx ** 2) 
+                    ).coalesce().to_sparse_csr()
 
-        self.T_no_inv =  self.exp_t_L_no_Id.to_sparse_coo().coalesce()
-        self.lower_left_no_inv, self.lower_right_no_inv = extract_lower_blocks(self.T_no_inv, nx + 2)
-        self.lower_left_no_inv = self.lower_left_no_inv.coalesce().to_sparse_csr() 
-        self.lower_right_no_inv = self.lower_right_no_inv.coalesce().to_sparse_csr()
+            self.exp_t_L_approx = self.T0 + self.T1 + self.T2 + self.T3 + self.T4 + self.T5 
+            self.exp_t_L_half_approx = self.T0 + .5 * self.T1 + .5 ** 2 * self.T2 + .5 ** 3 * self.T3 +\
+                    .5 ** 4 * self.T4 + .5 ** 5 * self.T5
 
-        self.lower_left, self.lower_right = extract_lower_blocks(self.T, nx + 2)
-        self.lower_left = self.lower_left.coalesce().to_sparse_csr()
-        self.lower_right = self.lower_right.coalesce().to_sparse_csr()
-        self.T = self.T.to_sparse_csr()
+            self.exp_t_L_no_Id  = self.T1 + self.T2 + self.T3 + self.T4 + self.T5
+            self.exp_t_L_no_first_two  = self.T2 + self.T3 + self.T4 + self.T5
 
-        self.T_next = self.L_inv @ self.L_inv @ (
-                (self.exp_t_L_no_Id.to_sparse_coo() - self.dt * self.L.to_sparse_coo()).to_sparse_csr()
-                )
+            self.T = (self.L_inv @ self.exp_t_L_no_Id).to_sparse_coo().coalesce()
 
-        # needed for inverse laplacian
-        self.kx = torch.fft.fftfreq(self.nx, d=self.dx) * 2 * np.pi
-        self.ky = torch.fft.fftfreq(self.nx, d=self.dx) * 2 * np.pi
-        self.kx, ky = torch.meshgrid(self.kx, self.ky, indexing='ij')
-        self.k2 = self.kx**2 + self.ky**2
-        self.k2[0, 0] = 1
+            self.T_no_inv =  self.exp_t_L_no_Id.to_sparse_coo().coalesce()
+            self.lower_left_no_inv, self.lower_right_no_inv = extract_lower_blocks(self.T_no_inv, nx + 2)
+            self.lower_left_no_inv = self.lower_left_no_inv.coalesce().to_sparse_csr() 
+            self.lower_right_no_inv = self.lower_right_no_inv.coalesce().to_sparse_csr()
+
+            self.lower_left, self.lower_right = extract_lower_blocks(self.T, nx + 2)
+            self.lower_left = self.lower_left.coalesce().to_sparse_csr()
+            self.lower_right = self.lower_right.coalesce().to_sparse_csr()
+            self.T = self.T.to_sparse_csr()
+
+            self.T_next = self.L_inv @ self.L_inv @ (
+                    (self.exp_t_L_no_Id.to_sparse_coo() - self.dt * self.L.to_sparse_coo()).to_sparse_csr()
+                    )
+
+            # needed for inverse laplacian
+            self.kx = torch.fft.fftfreq(self.nx, d=self.dx) * 2 * np.pi
+            self.ky = torch.fft.fftfreq(self.nx, d=self.dx) * 2 * np.pi
+            self.kx, ky = torch.meshgrid(self.kx, self.ky, indexing='ij')
+            self.k2 = self.kx**2 + self.ky**2
+            self.k2[0, 0] = 1
 
 
 
@@ -1183,8 +1183,8 @@ def plot_energy(solver, un, vn, names):
 
 
 if __name__ == '__main__':
-    L = 15
-    nx = ny = 256
+    L = 7
+    nx = ny = 200
     T = 10
     nt = 1000
     #initial_u = static_breather 
