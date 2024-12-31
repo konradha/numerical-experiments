@@ -324,7 +324,10 @@ def kink_start(x, y):
     return -4 * torch.exp(x + y) / (1 + torch.exp(2*x + 2*y))
 
 def analytical_kink_solution(x, y, t):
-    return 4 * torch.atan(torch.exp( x + y - t)) 
+    if isinstance(x, torch.Tensor):
+        return 4 * torch.atan(torch.exp( x + y - t)) 
+    else:
+        return 4 * np.atan(np.exp( x + y - t))
 
 
 class SineGordonIntegrator(torch.nn.Module):
@@ -1093,7 +1096,7 @@ def animate_comparison_with_kink_solution(X, Y, data, dt, num_snapshots, nt,):
         for i, method_name in enumerate(titles):
             axs[i+1].clear()
             axs[i+1].plot_surface(X, Y,
-                    data[method_name][frame],
+                    np.abs(analytical_kink_solution(X, Y, freq * dt * frame)-data[method_name][frame]),
                     cmap='viridis')
             axs[i+1].set_title(f"{method_name}, t={(frame * dt * (nt / num_snapshots)):.2f}")
     fps = 300
@@ -1108,7 +1111,7 @@ def plot_phase_diagram_quiver(un, vn, titles):
     for l in range(k):
         du_dt = np.gradient(un[l], axis=0)
         dv_dt = np.gradient(vn[l], axis=0)
-        n = 0#un[0].shape[1] // 2 
+        n = un[0].shape[1] // 2 
         
         plt.quiver(un[l][:, n, n], vn[l][:, n, n], du_dt[:, n, n], dv_dt[:, n, n],
                 label=titles[l],
@@ -1133,11 +1136,55 @@ def lyapunov_exponent(un, tn, names):
         plt.plot(tn, log_delta, label=names[k])
     plt.grid(True)
     plt.legend()
+    plt.title("Approximation of Lyapunov exponent")
     plt.show()
 
+def L_infty(u_gt, u):
+    return torch.norm((u_gt - u), p=float('inf'), dim=(1,2))
+
+def L_2(u_gt, u):
+    return torch.norm((u_gt - u), p=2, dim=(1,2))
+
+def RSME(u_gt, u):
+    return L_2(u_gt, u) / torch.sqrt(torch.tensor(u.shape[0], dtype=u.dtype))
+
+def error_norms(ground_truth, un, tn, names):
+    k = len(names)
+    #norm_names = ["$L_{\infty}$", "$L_2$"]
+    #norm_names = ["$L_{\infty}$"]
+    norm_names = ["RSME", "$L_{\infty}$", "$L_2$"]
+    for l in range(k):
+        for i, norm in enumerate([RSME, L_infty, L_2]):
+            plt.scatter(tn, norm(ground_truth, un[l]).cpu().numpy(), label=f"{names[l]}, {norm_names[i]}")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_energy(solver, un, vn, names):
+    k = len(names)
+    assert len(un) == k
+    assert len(vn) == k
+
+    for l in range(k):
+        es = []
+        for i in range(solver.num_snapshots):
+            u, v = un[l][i], vn[l][i]
+            es.append(solver.energy(u, v).cpu().numpy())
+        plt.plot(solver.tn.cpu().numpy()[
+                ::solver.snapshot_frequency][0:len(es)],
+            es, label=names[l])
+    plt.grid(True)
+    plt.xlabel("T / [1]")
+    plt.ylabel("E / [1]")
+    plt.legend()
+    plt.show()
+
+
+
 if __name__ == '__main__':
-    L = 5
-    nx = ny = 64
+    L = 15
+    nx = ny = 256
     T = 10
     nt = 1000
     #initial_u = static_breather 
@@ -1152,7 +1199,7 @@ if __name__ == '__main__':
         #'ETD1-krylov': None,
         #'Strang-split': None,
         'Energy-conserving-1': None,
-        'yoshida-4': None,
+        #'yoshida-4': None,
         #'RK4': None,
         'stormer-verlet-pseudo': None,
         #'gauss-legendre': None,
@@ -1181,18 +1228,29 @@ if __name__ == '__main__':
         v_quiver.append(v)
 
  
-        es = []
-        for i in range(solver.num_snapshots):
-            u, v = solver.u[i], solver.v[i]
-            es.append(solver.energy(u, v).cpu().numpy())
+    #    es = []
+    #    for i in range(solver.num_snapshots):
+    #        u, v = solver.u[i], solver.v[i]
+    #        es.append(solver.energy(u, v).cpu().numpy())
 
-        plt.plot(
-            solver.tn.cpu().numpy()[
-                ::solver.snapshot_frequency][0:len(es)],
-            es,
-            label=method)         
-    plt.legend()
-    plt.show()
+    #    plt.plot(
+    #        solver.tn.cpu().numpy()[
+    #            ::solver.snapshot_frequency][0:len(es)],
+    #        es,
+    #        label=method)         
+    #plt.legend()
+    #plt.show()
+
+    plot_energy(solver,
+            torch.stack([torch.tensor(u) for u in u_quiver]),
+            torch.stack([torch.tensor(v) for v in v_quiver]),
+            list(implemented_methods.keys()))
+
+    gt = torch.stack([analytical_kink_solution(solver.X, solver.Y, t) for t in solver.tn[::solver.snapshot_frequency]])
+    error_norms(gt,
+            torch.stack([torch.tensor(u) for u in u_quiver]),
+            solver.tn.cpu().numpy()[::solver.snapshot_frequency],
+            list(implemented_methods.keys()))
 
     plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
     lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
