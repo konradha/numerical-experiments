@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from tqdm import tqdm
+
 import matplotlib.pyplot as plt
 
 from typing import Callable
@@ -11,6 +11,16 @@ import torch.fft as fft
 
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+
+def get_progress_bar(iterable=None, total=None, **kwargs):
+    try:
+        from tqdm import tqdm
+        if iterable is not None:
+            return tqdm(iterable, **kwargs)
+        return tqdm(total=total, **kwargs)
+    except ImportError:
+        return iterable if iterable is not None else range(total)
+
 
 def extract_lower_blocks(sparse_matrix, n):
     """
@@ -1016,7 +1026,7 @@ class SineGordonIntegrator(torch.nn.Module):
         # depending on method might have to be used and well-updated
         last_k = [[u], [v]] if self.save_last_k else []
         abort = False
-        for i, t in enumerate(tqdm(self.tn)):
+        for i, t in get_progress_bar(enumerate(self.tn)):
             if i == 0:
                 continue  # we already initialized u0, v0
             u, v, last_k = self.step(u, v, last_k, i)
