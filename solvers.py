@@ -414,35 +414,37 @@ class SineGordonIntegrator(torch.nn.Module):
         self.dx = (self.Lx_max - self.Lx_min) / (nx + 1)
         self.dy = (self.Ly_max - self.Ly_min) / (ny + 1)
 
-        self.tn = torch.linspace(0, T, nt, dtype=self.dtype)
+        self.tn = torch.linspace(0, T, nt, dtype=self.dtype).to(self.device)
 
         self.xn = torch.linspace(
             Lx_min,
             Lx_max,
             self.nx,
             device=self.device,
-            dtype=self.dtype)
+            dtype=self.dtype).to(self.device)
         self.yn = torch.linspace(
             Ly_min,
             Ly_max,
             self.ny,
             device=self.device,
-            dtype=self.dtype)
+            dtype=self.dtype).to(self.device)
 
         self.u = torch.zeros(
             (self.num_snapshots,
              self.nx,
              self.ny),
             device=self.device,
-            dtype=self.dtype)
+            dtype=self.dtype).to(self.device)
         self.v = torch.zeros(
             (self.num_snapshots,
              self.nx,
              self.ny),
             device=self.device,
-            dtype=self.dtype)
+            dtype=self.dtype).to(self.device)
 
         self.X, self.Y = torch.meshgrid(self.xn, self.yn, indexing='ij')
+        self.X = self.X.to(self.device)
+        self.Y = self.Y.to(self.device)
 
         self.method = step_method
         self.step = implemented_methods[self.method]
@@ -453,15 +455,17 @@ class SineGordonIntegrator(torch.nn.Module):
         self.enable_energy_control = enable_energy_control
 
         self.c2 = c2(self.X, self.Y) if callable(c2) else c2
-        self.c2 = torch.tensor(self.c2) if not isinstance(
+        self.c2 = torch.tensor(self.c2).to(self.device) if not isinstance(
                 self.c2, torch.Tensor) else self.c2
 
         self.m = m(self.X, self.Y) if callable(m) else m
-        self.m = torch.tensor(self.m) if not isinstance(
+        self.m = torch.tensor(self.m).to(self.device) if not isinstance(
                 self.m, torch.Tensor) else self.m
 
         self.initial_u = initial_u
         self.initial_v = initial_v
+
+        self.buf = torch.zeros((self.nx, self.ny)).to(self.device)
 
         if 'ETD' in step_method:
             """
@@ -581,7 +585,7 @@ class SineGordonIntegrator(torch.nn.Module):
     # TODO benchmark the different variants
     #@torch.compile
     def grad_Vq(self, u):
-        out = u_xx_yy(torch.zeros_like(u), u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
+        out = u_xx_yy(self.buf, u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
         out.mul_(self.c2)
         out.sub_(self.m * torch.sin(u))
         return out
@@ -639,6 +643,9 @@ class SineGordonIntegrator(torch.nn.Module):
 
         xm, xM = torch.tensor(self.Lx_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
         ym, yM = torch.tensor(self.Ly_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
+
+        xm, xM, = xm.to(self.device), xM.to(self.device) 
+        ym, yM, = ym.to(self.device), yM.to(self.device)
 
         # u's ghost cells get approximation following boundary condition
         u[0,  1:-1] = u[1, 1:-1] + dx * boundary_x(xm, self.yn[1:-1], t)
@@ -1005,8 +1012,8 @@ class SineGordonIntegrator(torch.nn.Module):
 
         
     def evolve(self,):
-        u0 = self.initial_u(self.X, self.Y)
-        v0 = self.initial_v(self.X, self.Y)
+        u0 = self.initial_u(self.X, self.Y).to(self.device)
+        v0 = self.initial_v(self.X, self.Y).to(self.device)
 
         u, v = u0, v0
         E0 = self.energy(u, v)
@@ -1179,7 +1186,7 @@ def plot_energy(solver, un, vn, names):
     plt.xlabel("T / [1]")
     plt.ylabel("E / [1]")
     plt.legend()
-    plt.show()
+    plt.savefig("energy-sample-run.png", dpi=300)
 
 
 
@@ -1247,17 +1254,17 @@ if __name__ == '__main__':
             torch.stack([torch.tensor(v) for v in v_quiver]),
             list(implemented_methods.keys()))
 
-    gt = torch.stack([analytical_kink_solution(solver.X, solver.Y, t) for t in solver.tn[::solver.snapshot_frequency]])
-    error_norms(gt,
-            torch.stack([torch.tensor(u) for u in u_quiver]),
-            solver.tn.cpu().numpy()[::solver.snapshot_frequency],
-            list(implemented_methods.keys()))
+    #gt = torch.stack([analytical_kink_solution(solver.X, solver.Y, t) for t in solver.tn[::solver.snapshot_frequency]])
+    #error_norms(gt,
+    #        torch.stack([torch.tensor(u) for u in u_quiver]),
+    #        solver.tn.cpu().numpy()[::solver.snapshot_frequency],
+    #        list(implemented_methods.keys()))
 
-    plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
-    lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
+    #plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
+    #lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
 
-    animate_comparison_with_kink_solution(solver.X, solver.Y, implemented_methods, solver.dt,
-            solver.num_snapshots, solver.nt,)
+    #animate_comparison_with_kink_solution(solver.X, solver.Y, implemented_methods, solver.dt,
+    #        solver.num_snapshots, solver.nt,)
     #animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
     #        solver.num_snapshots, solver.nt,)
 
