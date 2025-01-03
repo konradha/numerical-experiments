@@ -953,7 +953,7 @@ class SineGordonIntegrator(torch.nn.Module):
             # this fix point iteration does not take into account the
             # boundary conditions nicely -- which may make it decay
             # under certain spatial discretization for example
-            for i in range(max_iter):
+            for _ in range(max_iter):
                 k1u_old = k1u.clone()
                 k1v_old = k1v.clone()
                 k2u_old = k2u.clone()
@@ -962,7 +962,7 @@ class SineGordonIntegrator(torch.nn.Module):
                 u2 = u + dt * (a21 * k1u + a22 * k2u)
                 k1v = self.grad_Vq(u1)
                 k2v = self.grad_Vq(u2)
-                self.apply_bc(k1v, k2v)
+                self.apply_bc(k1v, k2v, i)
                 k1u = v + dt * (a11 * k1v + a12 * k2v)
                 k2u = v + dt * (a21 * k1v + a22 * k2v)
                 err = np.sum([
