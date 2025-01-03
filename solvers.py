@@ -228,6 +228,23 @@ def u_xx_yy(buf, a, dx, dy):
     )
     return uxx_yy
 
+def u_xx_yy_9(buf, a, dx, dy):
+    uxx_yy = buf
+    uxx_yy[1:-1,1:-1] = (1/(6*dx*dy)) * (
+        4*(a[1:-1,2:] + a[1:-1,:-2] + a[2:,1:-1] + a[:-2,1:-1]) + 
+        a[2:,2:] + a[:-2,:-2] + a[2:,:-2] + a[:-2,2:] - 
+        20*a[1:-1,1:-1])    
+    return uxx_yy
+
+def u_xx_yy_13(buf, a, dx, dy):
+    uxx_yy = buf
+    uxx_yy[1:-1, 1:-1] = (1 / (12 * dx * dy)) * (
+        10 * (a[1:-1, 2:] + a[1:-1, :-2] + a[2:, 1:-1] + a[:-2, 1:-1]) +
+        5 * (a[2:, 2:] + a[2:, :-2] + a[:-2, 2:] + a[:-2, :-2]) -
+        60 * a[1:-1, 1:-1]
+    )
+    return uxx_yy
+
 
 @dataclass
 class SolitonParameters:
@@ -591,7 +608,7 @@ class SineGordonIntegrator(torch.nn.Module):
     # TODO benchmark the different variants
     @torch.compile
     def grad_Vq(self, u):
-        out = u_xx_yy(torch.zeros_like(u), u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
+        out = u_xx_yy_9(torch.zeros_like(u), u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
         out.mul_(self.c2)
         out.sub_(self.m * torch.sin(u))
         return out
