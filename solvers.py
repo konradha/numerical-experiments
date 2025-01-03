@@ -47,7 +47,7 @@ def extract_lower_blocks(sparse_matrix, n):
 
     return B, D
 
-@torch.compile
+#@torch.compile
 def arnoldi_iteration_compiled(A, v, k, t):
     m = A.shape[0]
     Q = torch.zeros((m, k+1), dtype=A.dtype)
@@ -209,7 +209,7 @@ def u_xx(a, dx):
 
 # torch eager mode might be perfectly well-suited here
 # and fusing by hand does most of the work!
-@torch.jit.script
+#@torch.jit.script
 def u_xx_yy(buf, a, dx, dy):
     uxx_yy = buf
     uxx_yy[1:-1, 1:-1] = (
@@ -579,7 +579,7 @@ class SineGordonIntegrator(torch.nn.Module):
 
     # enable for long time-stepping!
     # TODO benchmark the different variants
-    @torch.compile
+    #@torch.compile
     def grad_Vq(self, u):
         out = u_xx_yy(torch.zeros_like(u), u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
         out.mul_(self.c2)
@@ -1016,7 +1016,8 @@ class SineGordonIntegrator(torch.nn.Module):
         # depending on method might have to be used and well-updated
         last_k = [[u], [v]] if self.save_last_k else []
         abort = False
-        for i, t in enumerate(tqdm(self.tn)):
+        #for i, t in enumerate(tqdm(self.tn)):
+        for i, t in enumerate(self.tn):
             if i == 0:
                 continue  # we already initialized u0, v0
             u, v, last_k = self.step(u, v, last_k, i)

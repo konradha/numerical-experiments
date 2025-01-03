@@ -17,12 +17,12 @@ def collect_statistics(base_path=None, dev='cpu'):
     L = 7
     T = 10.
 
-    #nts = [1000, 2500, 5000, 10000]
-    #N = [50, 100, 200, 500,]
+    nts = [1000, 2500, 5000, 10000]
+    N = [50, 100, 200, 500,]
 
-    # testing
-    nts = [1000]
-    N = [50]
+    ## testing
+    #nts = [1000]
+    #N = [50]
     
     ntrials = 5
  
@@ -50,7 +50,7 @@ def collect_statistics(base_path=None, dev='cpu'):
 
     fpaths = []
     fnames = []
-    base_path = os.getcwd() + "/benchmark_data" if base_path is None else base_path
+    base_path = os.getcwd() + f"/benchmark_data_{dev}" if base_path is None else base_path
 
     if os.path.exists(base_path):
         print("Found existing benchmark, deleting")
@@ -182,4 +182,4 @@ def collect_statistics(base_path=None, dev='cpu'):
 
 
 if __name__ == '__main__':
-    collect_statistics()
+    collect_statistics(dev='cuda')
