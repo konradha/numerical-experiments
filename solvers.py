@@ -254,7 +254,8 @@ class SolitonParameters:
     phase: torch.Tensor
 
 def ring_soliton(X, Y, xc, yc, R):
-    return 4 * torch.arctan(((X - xc) ** 2 + (X - yc) ** 2) / (2 * R))
+    return 4 * torch.arctan(torch.exp(-torch.sqrt(((X - xc) ** 2 + (X - yc) ** 2)) - R))
+    #return 4 * torch.arctan(((X - xc) ** 2 + (X - yc) ** 2) / (2 * R))
     #return 4 * torch.arctan(((X - xc) ** 2 + (X - yc) ** 2 - R ** 2) / (2 * R))
 
 def ring_soliton_center(X, Y):
@@ -393,6 +394,11 @@ class SineGordonIntegrator(torch.nn.Module):
             'lie-euler': self.lie_euler_step,
             'yoshida-4': self.yoshida4_step,
             'yoshida-6': self.yoshida6_step,
+            'candy-neri6': self.candy_neri6_step,
+            'ruth': self.ruth_step,
+            'symplectic-euler': self.symplectic_euler_step,
+            'AVF': self.avf_step,
+            'AVF-explicit': self.avf_explicit_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
@@ -410,6 +416,11 @@ class SineGordonIntegrator(torch.nn.Module):
             'lie-euler': None,
             'yoshida-4': None,
             'yoshida-6': None,
+            'candy-neri6': None,
+            'ruth': None,
+            'symplectic-euler': None,
+            'AVF': None,
+            'AVF-explicit': None,
         }
 
         implemented_boundary_conditions = {
@@ -490,6 +501,8 @@ class SineGordonIntegrator(torch.nn.Module):
         self.initial_u = initial_u
         self.initial_v = initial_v
 
+        self.buf = torch.zeros((self.nx, self.ny)).to(self.device)
+
         if 'ETD' in step_method:
             """
             This evolution uses approximations of exp(tau * L) where L is a block-sparse matrix
@@ -502,7 +515,7 @@ class SineGordonIntegrator(torch.nn.Module):
             and D2 is the discretized Laplacian (5-point stencil) of the finite differences
             method and homogenous von Neumann bounday conditions (no flux conditions).
 
-            Using Taylor expansion one can show that very quickly terms of order O(tau⁴) appear.
+            None, one can show that very quickly terms of order O(tau⁴) appear.
             Assuming tau in the order of 1e-2, one can assume that this approximation should work
             fairly nicely, as we reach machine precision after that. To be confirmed in numerical
             experiments.
@@ -608,7 +621,7 @@ class SineGordonIntegrator(torch.nn.Module):
     # TODO benchmark the different variants
     @torch.compile
     def grad_Vq(self, u):
-        out = u_xx_yy_9(torch.zeros_like(u), u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
+        out = u_xx_yy(self.buf, u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
         out.mul_(self.c2)
         out.sub_(self.m * torch.sin(u))
         return out
@@ -695,6 +708,41 @@ class SineGordonIntegrator(torch.nn.Module):
         v[1:-1, 0]  = boundary_y(self.xn[1:-1], ym, t)
         v[1:-1, -1] = boundary_y(self.xn[1:-1], yM, t)
 
+    def symplectic_euler_step(self, u, v, last_k, i):
+        un = u + self.dt * v
+        vn = v + self.dt * self.grad_Vq(un)
+        return un, vn, []
+
+    def ruth_step(self, u, v, last_k, i):
+        c = 2/3
+        vn = v + c * self.dt * self.grad_Vq(u)
+        un = u + c * self.dt * vn
+        vn = vn - c * self.dt * self.grad_Vq(un)
+        un = un - c * self.dt * vn
+        vn = vn + self.dt * self.grad_Vq(un)
+        un = un + self.dt * vn
+        return un, vn, []
+
+    def candy_neri6_step(self, u, v, last_k, i): 
+        a = [
+            0.37693334772664,
+            -0.15828265660178,
+            0.39590138677536,
+            -0.18977338823387,
+            -0.18977338823387,
+            0.39590138677536,
+            -0.15828265660178,
+            0.37693334772664
+        ]
+
+        un, vn = u, v
+        for ai in a:
+            vn = vn + ai * self.dt * self.grad_Vq(un)
+            un = un + ai * self.dt * vn
+            self.apply_bc(un, vn, i)
+
+        return un, vn, []
+
 
     def leapfrog_step(self, u, v, last_k, i):
         uhalf = u + .5 * self.dt * v
@@ -710,10 +758,10 @@ class SineGordonIntegrator(torch.nn.Module):
         un, vn = u, v
         un_prev = u
         for w in weights: 
-            #w = .5 * w
+            w = .5 * w
             vn = vn + w * self.dt * self.grad_Vq(un) 
             un = un + w * self.dt * vn
-            #self.apply_bc(un, vn, i) 
+            self.apply_bc(un, vn, i) 
         return un, vn, []
 
     def yoshida6_step(self, u, v, last_k, i):
@@ -747,10 +795,11 @@ class SineGordonIntegrator(torch.nn.Module):
             un = u + self.dt * vn
             return un, vn, [u]
          
-        u_past = last_k[0]
+        u_past = last_k[-1]
         un = 2 * u - u_past + self.dt ** 2 * self.grad_Vq(u) 
         vn = (un - u) / self.dt
-        return un, vn, [u]
+        last_k.append(u)
+        return un, vn, last_k
 
     def ieq_step(self, q, p, last_k, i):
         # TODO: understand method fully
@@ -767,19 +816,129 @@ class SineGordonIntegrator(torch.nn.Module):
 
         return q_new, p_new, []
 
+    def eec_sparse_step_gl(self, u, v, last_k, i):
+        weights = torch.tensor([0.236926885, 0.478628670, 0.568888889, 0.478628670, 0.236926885], device=self.device)
+        points = torch.tensor([-0.906179846, -0.538469310, 0.0, 0.538469310, 0.906179846], device=self.device)
+        scaled_points = (points + 1) / 2 * self.dt
+        def integrate_forces_gl(u_free):
+            forces = [self.grad_Vq(u_free(t)) for t in scaled_points]
+            [self.apply_bc(u, f, i) for f in forces]
+            forces = torch.stack(forces) 
+            [self.apply_bc(forces[k], v, i) for k in range(5)]
+            force_sum = torch.einsum('k,knm->nm', weights, forces)
+            return -.5 * self.dt * force_sum
+
+        if i == 1:
+            phalf = v
+        else:
+            phalf = last_k[0]
+
+        u_free = lambda t: u + t * phalf
+        force_integral = integrate_forces_gl(u_free)
+        v_new = v - force_integral
+        u_new = u + self.dt * v_new
+        return u_new, v_new, [v_new]
+
+    def eec_sparse_step_pass(self, u, v, last_k, i):
+        if i == 1:
+            return u + self.dt * v, v + self.dt * self.grad_Vq(u), [u, v]
+        return u, v, [] 
 
     def eec_sparse_step(self, u, v, last_k, i):
+        if i == 1:
+            return u + self.dt * v, v + self.dt * self.grad_Vq(u), [u, v]
+        def ux_uy(u):
+            u_x = torch.zeros_like(u)
+            u_y = torch.zeros_like(u)
+            u_x[1:-1, :] = (u[2:, :] - u[:-2, :]) / 2
+            u_x[0, :] = u[1, :] - u[0, :]
+            u_x[-1, :] = u[-1, :] - u[-2, :]
+            u_y[:, 1:-1] = (u[:, 2:] - u[:, :-2]) / 2 
+            u_y[:, 0] = u[:, 1] - u[:, 0]
+            u_y[:, -1] = u[:, -1] - u[:, -2]
+            return u_x, u_y
+
+        def f(u, v):
+            dx = torch.tensor(self.dx)
+            dy = torch.tensor(self.dy)
+            un = u + self.dt * v 
+            d = un - u + 1e-10 
+            vn = v + self.dt * (u_xx_yy_9(self.buf, un + u, dx, dy)/ 2 - self.m * (
+                -2 * torch.sin((u+un) / 2) * torch.sin((un-u)/2)  / d)) 
+            return un, vn
+
+        un, vn = f(u, v)  
+        return un, vn, []
+
+    def avf_step(self, u, v, last_k, i):
+        # guesses
+        un = u 
+        vn = v  
+        dx = torch.tensor(self.dx)
+        dy = torch.tensor(self.dy)
+        max_iter = 10
+        for _ in range(max_iter): 
+            avg_sin = torch.sin((u + un)/2) * 2*torch.sin((un-u)/2)/(un-u + 1e-10)
+            avg_lap = u_xx_yy(self.buf, un + u, dx, dy) / 2    
+            vn_new = v + self.dt*(avg_lap - self.m*avg_sin)
+            un_new = u + self.dt*vn_new
+           
+            if torch.norm(un_new - un) + torch.norm(vn_new - vn) < 1e-6:
+                un = un_new
+                un = vn_new
+                break 
+            un = un_new
+            vn = vn_new 
+        return un, vn, []
+
+    def avf_explicit_step(self, u, v, last_k, i):
+        if i < 4:
+            return self.stormer_verlet_step(u, v, last_k, i)
+
+        dx = torch.tensor(self.dx)
+        dy = torch.tensor(self.dy)
+
+        u2, u1, u0 = last_k[::-1]
+        u2 = u
+
+        r = self.dt
+        assert dx == dy
+  
+        lap_u21 = u_xx_yy(self.buf, u2 + u1, dx, dy)
+        #lap_u1 = u_xx_yy(self.buf, u1, dx, dy)
+
+        G_u2 = 1 - torch.cos(u2)
+        G_u1 = 1 - torch.cos(u1)
+
+        #G_u2 = torch.cos(u2)
+        #G_u1 = torch.cos(u1)
+ 
+        un = (u2 + u1 - u0 + 
+              2 * r**2 * (lap_u21 - (G_u2 - G_u1) / (u2 - u1)))
+        #print(torch.max(2 * r**2 * lap_u21 - 2 * r**2 * (G_u2 - G_u1) / (u2 - u1)))
+        #import pdb; pdb.set_trace()
+        
+        vn = (un - u1) / (2 * self.dt)
+        return un, vn, [un, u2, u1]
+
+
+    def eec_sparse_step_old(self, u, v, last_k, i):
         # these integral approximations could get some work
         # currently smoothing out unnecessarily
-        def integrate_forces_mid(u_free):
+        def integrate_forces(u_free):
             midpoint = u_free(0.5 * self.dt)
             return -self.dt * self.grad_Vq(midpoint)
 
-        def integrate_forces(u_free):
+        fs = torch.zeros((3, u.shape[0], u.shape[1]), dtype=self.dtype)
+        def integrate_forces_rule(u_free):
             points = [0.5 - np.sqrt(15)/10, 0.5, 0.5 + np.sqrt(15)/10]
             weights = [5/18, 4/9, 5/18]
-
-            force_sum = sum(w * self.grad_Vq(u_free(t * self.dt)) for t, w in zip(points, weights))
+            # important: enforce boundary conditions for integral     
+            for k, (t, w) in enumerate(zip(points, weights)):
+                #if fs != []: self.apply_bc(u, fs[-1], i)
+                f = w * self.grad_Vq(u_free(t * self.dt))     
+                fs[k] = f
+            force_sum = torch.sum(fs, axis=0) 
             return -self.dt * force_sum
 
         def integrate_forces_gl(u_free):
@@ -817,21 +976,23 @@ class SineGordonIntegrator(torch.nn.Module):
         else:
             phalf = last_k[0]
  
-        #u_new = u + self.dt * phalf
-        #u_free = lambda t: u_new + t * phalf
-        #phalf = phalf - 2 * integrate_forces(u_free)
-        #v_new = self.grad_Vq(u_new)
-     
-        #return u_new, v_new, [phalf]
+        u_new = u + self.dt * phalf
+        u_free = lambda t: u_new + t * phalf
+        phalf = phalf - integrate_forces(u_free)
+        self.apply_bc(u, phalf, i)
+        v_new = self.grad_Vq(u_new) 
+        return u_new, v_new, [phalf]
 
-        u_free = lambda t: u + t * v
-        force_integral = integrate_forces(u_free)
+
+        # somewhat working version, boundaries have an issue
+        #u_free = lambda t: u + t * v
+        #force_integral = integrate_forces(u_free)
        
-        # TODO: figure out: according to paper we need factor 2 here?
-        v_new = v -  force_integral
-        u_new = u + self.dt * v_new
+        ## TODO: figure out: according to paper we need factor 2 here?
+        #v_new = v -  force_integral
+        #u_new = u + self.dt * v_new
        
-        return u_new, v_new, [v_new]
+        #return u_new, v_new, [v_new]
 
 
 
@@ -918,10 +1079,22 @@ class SineGordonIntegrator(torch.nn.Module):
         return un, vn, [sine_term]
 
     def strang_step(self, u, v, last_k, i):
-        vn = (v.reshape((self.nx ** 2)) + 0.5 * self.dt * self.D2 @ u.reshape(self.nx ** 2))    
-        un = u.reshape(self.nx ** 2) + self.dt * vn + .5 * self.dt ** 2 * torch.sin(u.reshape(self.nx ** 2))
+        #vn = v + self.dt * u_xx_yy(
+        #    self.buf, u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))   
+        #un = u + self.dt * vn - .5 * self.dt ** 2 * torch.sin(u)
 
-        return un.reshape((self.nx,self.nx)), vn.reshape((self.nx,self.nx)), []
+        #return un, vn, []
+
+        v_half = v + 0.5 * self.dt * u_xx_yy(
+            self.buf, u, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
+        u_half = u + 0.5 * self.dt * v_half
+        v_full = v_half - self.dt * torch.sin(u_half)
+        u_full = u_half + 0.5 * self.dt * v_full
+        v_final = v_full + 0.5 * self.dt * u_xx_yy(
+            self.buf, u_full, torch.tensor(self.dx, dtype=self.dtype), torch.tensor(self.dy, dtype=self.dtype))
+        u_final = u_full + 0.5 * self.dt * v_final
+
+        return u_final, v_final, []
 
     def etd2_sparse_step(self, u, v, last_k, i):
         u, v = u.ravel(), v.ravel()
@@ -1210,34 +1383,36 @@ def plot_energy(solver, un, vn, names):
 
 
 if __name__ == '__main__':
-    L = 7
-    nx = ny = 200
+    L = 3
+    nx = ny = 120
     T = 10
     nt = 1000
-    #initial_u = static_breather 
-    #initial_v = zero_velocity
+    initial_u = ring_soliton_center#static_breather 
+    initial_v = zero_velocity
 
-    initial_u = kink
-    initial_v = kink_start
+    #initial_u = kink
+    #initial_v = kink_start
     
     implemented_methods = {
         #'ETD2-sparse': None,
         #'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
         #'Strang-split': None,
-        'Energy-conserving-1': None,
-        #'yoshida-4': None,
+        'AVF-explicit': None,
+        #'Strang-split': None,
+        'yoshida-4': None,
         #'RK4': None,
         'stormer-verlet-pseudo': None,
         #'gauss-legendre': None,
-        'RK4': None,
+        #'candy-neri6': None,
+        #'RK4': None,
     }
 
     u_quiver, v_quiver = [], [] 
     for method in implemented_methods.keys():
         solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                   ny, T, nt, initial_u, initial_v, step_method=method,
-                                  boundary_conditions='special-kink-bc',
+                                  boundary_conditions='homogeneous-neumann',
                                   #c2 = lambda X, Y: .1 * torch.exp(-(X ** 2 + Y ** 2)),
                                   #c2 = lambda X, Y: torch.exp(-(1/X**2 + 1/Y**2)),
                                   snapshot_frequency=10,
@@ -1273,19 +1448,19 @@ if __name__ == '__main__':
             torch.stack([torch.tensor(v) for v in v_quiver]),
             list(implemented_methods.keys()))
 
-    gt = torch.stack([analytical_kink_solution(solver.X, solver.Y, t) for t in solver.tn[::solver.snapshot_frequency]])
-    error_norms(gt,
-            torch.stack([torch.tensor(u) for u in u_quiver]),
-            solver.tn.cpu().numpy()[::solver.snapshot_frequency],
-            list(implemented_methods.keys()))
+    #gt = torch.stack([analytical_kink_solution(solver.X, solver.Y, t) for t in solver.tn[::solver.snapshot_frequency]])
+    #error_norms(gt,
+    #        torch.stack([torch.tensor(u) for u in u_quiver]),
+    #        solver.tn.cpu().numpy()[::solver.snapshot_frequency],
+    #        list(implemented_methods.keys()))
 
     plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
     lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
 
-    animate_comparison_with_kink_solution(solver.X, solver.Y, implemented_methods, solver.dt,
-            solver.num_snapshots, solver.nt,)
-    #animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
+    #animate_comparison_with_kink_solution(solver.X, solver.Y, implemented_methods, solver.dt,
     #        solver.num_snapshots, solver.nt,)
+    animate_comparison(solver.X, solver.Y, implemented_methods, solver.dt,
+            solver.num_snapshots, solver.nt,)
 
 
     
