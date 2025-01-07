@@ -204,14 +204,14 @@ def sparse_block(block_list, row_offsets, col_offsets, shape):
     return torch.sparse_coo_tensor(combined_indices, combined_values, size=shape)
 
 #@torch.jit.script
-def u_yy(a, dy):
+def u_yy(buf, a, dy):
     uyy = torch.zeros_like(a)
     uyy[1:-1, 1:-1] = (a[1:-1, 2:] + a[1:-1, :-2] -
                        2 * a[1:-1, 1:-1]) / (dy ** 2)
     return uyy
 
 #@torch.jit.script
-def u_xx(a, dx):
+def u_xx(buf, a, dx):
     uxx = torch.zeros_like(a)
     uxx[1:-1, 1:-1] = (a[2:, 1:-1] + a[:-2, 1:-1] -
                        2 * a[1:-1, 1:-1]) / (dx ** 2)
@@ -399,6 +399,7 @@ class SineGordonIntegrator(torch.nn.Module):
             'symplectic-euler': self.symplectic_euler_step,
             'AVF': self.avf_step,
             'AVF-explicit': self.avf_explicit_step,
+            'HBVM': self.hbvm_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
@@ -421,6 +422,7 @@ class SineGordonIntegrator(torch.nn.Module):
             'symplectic-euler': None,
             'AVF': None,
             'AVF-explicit': None,
+            'HBVM': None,
         }
 
         implemented_boundary_conditions = {
@@ -648,7 +650,33 @@ class SineGordonIntegrator(torch.nn.Module):
         integrand = torch.sum((ux2 + uy2) + ut2 + (cos))
         return 0.5 * integrand * self.dx * self.dy
 
-    def neumann_bc(self, u, v, i):
+    def energy_density(self, u, v):
+        ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * self.dx)
+        uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (2. * self.dy)
+        ut = v[1:-1, 1:-1]
+
+        return (.5 * (ut**2 + ux**2 + uy**2) + (1 - torch.cos(u[1:-1, 1:-1]))) 
+
+    def energy_flux(self, u, v):
+        lap = (u_xx(self.buf, u, torch.tensor(self.dx, dtype=self.dtype))
+                + u_yy(self.buf, u, torch.tensor(self.dy, dtype=self.dtype)))[1:-1, 1:-1]
+        
+        # v \Delta u
+        t1 = v[1:-1, 1:-1] * lap
+        grad_v = torch.stack([
+            (v[1:-1, 2:] - v[1:-1, :-2]) / (2. * self.dx),
+            (v[2:, 1:-1] - v[:-2, 1:-1]) / (2. * self.dy)
+            ]).reshape(2, (self.nx-2) ** 2)
+        grad_u = torch.stack([
+            (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * self.dx),
+            (u[2:, 1:-1] - u[:-2, 1:-1]) / (2. * self.dy)
+            ]).reshape(2, (self.nx-2) ** 2)
+        
+        # grad u dot grad v
+        t2 = grad_u[0] * grad_u[0] + grad_u[1] * grad_u[1] 
+        return t1 + t2.reshape((self.nx-2, self.nx-2))
+
+    def neumann_bc(self, u, v, i, tau=None):
         u[0, 1:-1] = u[1, 1:-1]
         u[-1, 1:-1] = u[-2, 1:-1]
         u[:, 0] = u[:, 1]
@@ -659,7 +687,8 @@ class SineGordonIntegrator(torch.nn.Module):
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
 
-    def special_kink_bc(self, u, v, i):
+    def special_kink_bc(self, u, v, i, tau=None):
+        
         def boundary_x(x, Y, t): 
             x = float(x) * torch.ones_like(Y)
             t = t * torch.ones_like(Y)
@@ -675,7 +704,7 @@ class SineGordonIntegrator(torch.nn.Module):
         dx = self.dx
         dy = self.dy
         dt = self.dt
-        t = i * self.dt
+        t = i * self.dt if tau is None else tau
 
         xm, xM = torch.tensor(self.Lx_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
         ym, yM = torch.tensor(self.Ly_min, dtype=self.dtype), torch.tensor(self.Lx_max, dtype=self.dtype)
@@ -801,6 +830,40 @@ class SineGordonIntegrator(torch.nn.Module):
         last_k.append(u)
         return un, vn, last_k
 
+    def hbvm_step(self, u, v, last_k, i):
+        from scipy.special import legendre
+
+        def buildAB(k, s):
+            V = torch.zeros((k, s+1), device=self.device, dtype=self.dtype)
+            for i in range(s+1):
+                V[:, i] = self._shifted_legendre(self.nodes, i)
+
+        # TODO!
+        # no energy correction
+        k = 5
+        s = 5
+        nodes, weights = np.polynomial.legendre.leggauss(k)
+        nodes = torch.tensor(nodes, dtype=self.dtype)
+        weights = torch.tensor(weights, dtype=self.dtype)
+        P = torch.zeros((k, s), dtype=self.dtype)
+        for i in range(s):
+            leg_poly = legendre(i)
+            P[:, i] = torch.tensor([leg_poly(x) for x in nodes], dtype=self.dtype)
+
+        def H(u, v):
+            u_x = (u[1:, :] - u[:-1, :]) / self.dx
+            u_y = (u[:, 1:] - u[:, :-1]) / self.dy
+            h = 0.5 * torch.sum(v**2) + \
+                0.5 * self.c2 * (torch.sum(u_x**2) + torch.sum(u_y**2)) - \
+                self.m * torch.sum(1 - torch.cos(u))
+            return h
+
+        H0 = H(u, v)
+        for i in range(k):
+            pass
+
+
+
     def ieq_step(self, q, p, last_k, i):
         # TODO: understand method fully
         if i == 0 or i == 1: self.epsilon = 1e-6
@@ -844,7 +907,7 @@ class SineGordonIntegrator(torch.nn.Module):
             return u + self.dt * v, v + self.dt * self.grad_Vq(u), [u, v]
         return u, v, [] 
 
-    def eec_sparse_step(self, u, v, last_k, i):
+    def eec_sparse_step_incomplete(self, u, v, last_k, i):
         if i == 1:
             return u + self.dt * v, v + self.dt * self.grad_Vq(u), [u, v]
         def ux_uy(u):
@@ -871,25 +934,14 @@ class SineGordonIntegrator(torch.nn.Module):
         return un, vn, []
 
     def avf_step(self, u, v, last_k, i):
-        # guesses
-        un = u 
-        vn = v  
-        dx = torch.tensor(self.dx)
-        dy = torch.tensor(self.dy)
-        max_iter = 10
-        for _ in range(max_iter): 
-            avg_sin = torch.sin((u + un)/2) * 2*torch.sin((un-u)/2)/(un-u + 1e-10)
-            avg_lap = u_xx_yy(self.buf, un + u, dx, dy) / 2    
-            vn_new = v + self.dt*(avg_lap - self.m*avg_sin)
-            un_new = u + self.dt*vn_new
-           
-            if torch.norm(un_new - un) + torch.norm(vn_new - vn) < 1e-6:
-                un = un_new
-                un = vn_new
-                break 
-            un = un_new
-            vn = vn_new 
-        return un, vn, []
+        def F(U):
+            return -self.m * torch.sin(U)
+
+        def get_A():
+            return build_D2(self.nx-2, self.ny-2, self.dx, self.dy, self.dtype)
+
+        return u, v, []
+            
 
     def avf_explicit_step(self, u, v, last_k, i):
         if i < 4:
@@ -921,22 +973,47 @@ class SineGordonIntegrator(torch.nn.Module):
         vn = (un - u1) / (2 * self.dt)
         return un, vn, [un, u2, u1]
 
+    def avf_explicit_step(self, u, v, last_k, i):
+        u_np1 = u + self.dt * v
+        p_np1 = v
+        dx = torch.tensor(self.dx)
+        dy = torch.tensor(self.dy)
 
-    def eec_sparse_step_old(self, u, v, last_k, i):
+        max_iter = 10
+        for _ in range(max_iter): 
+            u_np1_old = u_np1.clone()
+            p_np1_old = p_np1.clone()
+            u_np1 = u + 0.5 * self.dt * (v + p_np1)
+            u_sum = u + u_np1
+            u_diff = u_np1 - u
+
+            cos_diff_term = (torch.cos(u_np1) - torch.cos(u))/  u_diff
+            p_np1 = v + self.dt * (
+                0.5 * u_xx_yy(self.buf, u_sum, dx, dy) - self.m * cos_diff_term
+            )
+            if (torch.norm(u_np1 - u_np1_old) < 1e-6 and
+                torch.norm(p_np1 - p_np1_old) < 1e-6):
+                break
+
+        return u_np1, p_np1, []
+
+
+    def eec_sparse_step(self, u, v, last_k, i):
         # these integral approximations could get some work
         # currently smoothing out unnecessarily
-        def integrate_forces(u_free):
+        def integrate_forces_mid(u_free):
             midpoint = u_free(0.5 * self.dt)
             return -self.dt * self.grad_Vq(midpoint)
 
         fs = torch.zeros((3, u.shape[0], u.shape[1]), dtype=self.dtype)
-        def integrate_forces_rule(u_free):
+        def integrate_forces(u_free):
             points = [0.5 - np.sqrt(15)/10, 0.5, 0.5 + np.sqrt(15)/10]
             weights = [5/18, 4/9, 5/18]
             # important: enforce boundary conditions for integral     
             for k, (t, w) in enumerate(zip(points, weights)):
                 #if fs != []: self.apply_bc(u, fs[-1], i)
                 f = w * self.grad_Vq(u_free(t * self.dt))     
+                #self.apply_bc(u, v, i, self.dt + t)
                 fs[k] = f
             force_sum = torch.sum(fs, axis=0) 
             return -self.dt * force_sum
@@ -1374,45 +1451,106 @@ def plot_energy(solver, un, vn, names):
         plt.plot(solver.tn.cpu().numpy()[
                 ::solver.snapshot_frequency][0:len(es)],
             es, label=names[l])
+        
     plt.grid(True)
     plt.xlabel("T / [1]")
     plt.ylabel("E / [1]")
     plt.legend()
     plt.show()
 
+def plot_energy_with_err(solver, un, vn, names): 
+    k = len(names)
+    assert len(un) == k
+    assert len(vn) == k
+    fig, axs = plt.subplots(figsize=(20, 20), ncols=2,)
+
+    for l in range(k):
+        es = []
+        for i in range(solver.num_snapshots):
+            u, v = un[l][i], vn[l][i]
+            es.append(solver.energy(u, v).cpu().numpy())
+        axs[0].plot(solver.tn.cpu().numpy()[
+                ::solver.snapshot_frequency][0:len(es)],
+            es, label=names[l])
+
+        axs[1].plot(solver.tn.cpu().numpy()[
+                ::solver.snapshot_frequency][0:len(es)],
+            (np.array(es) - es[0]), label=names[l])
+
+    plt.legend()
+    plt.show()
+
+def plot_density_flux(X, Y, density, flux, name):
+    fig, axs = plt.subplots(figsize=(20, 20), ncols=3, subplot_kw={"projection":'3d'})
+    axs[0].plot_surface(X, Y, density,
+                    cmap='viridis')
+    axs[0].set_title("energy density")
+    axs[1].plot_surface(X, Y, flux,
+                    cmap='viridis')
+    axs[1].set_title("flux")
+
+    axs[2].plot_surface(X, Y, torch.abs(flux-density),
+                    cmap='viridis')
+    axs[2].set_title("diff")
+    fig.suptitle(name)
+    plt.show()
+
+def animate_density_flux(X, Y, densities, fluxes, name, num_snapshots):
+    from matplotlib.animation import FuncAnimation
+    fig, axs = plt.subplots(figsize=(20, 20), ncols=3, subplot_kw={"projection":'3d'})
+     
+    def update(frame):
+        for i in range(3): axs[i].clear() 
+        axs[0].plot_surface(X, Y, densities[frame],
+                        cmap='viridis')
+        axs[0].set_title("Hamiltonian density \n$\\frac{1}{2} \left ( u_t^2 + u_x^2 + u_y^2 \\right) + (1 - cos(u))$")
+        axs[1].plot_surface(X, Y, fluxes[frame],
+                        cmap='viridis')
+        axs[1].set_title("Energy flux \n$u \Delta v + \\nabla u \cdot \\nabla v$")
+
+        axs[2].plot_surface(X, Y, np.abs(fluxes[frame]-densities[frame]),
+                        cmap='viridis')
+        axs[2].set_title("diff") 
+        fig.suptitle(f"{name}, t=")
+    fps = 300
+    ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
+    plt.show()
+
 
 
 if __name__ == '__main__':
     L = 3
-    nx = ny = 120
+    nx = ny = 256
     T = 10
     nt = 1000
-    initial_u = ring_soliton_center#static_breather 
-    initial_v = zero_velocity
+    #initial_u = ring_soliton_center#static_breather 
+    #initial_v = zero_velocity
 
-    #initial_u = kink
-    #initial_v = kink_start
+    initial_u = kink
+    initial_v = kink_start
     
     implemented_methods = {
         #'ETD2-sparse': None,
         #'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
         #'Strang-split': None,
-        'AVF-explicit': None,
+        #'HBVM': None,
         #'Strang-split': None,
-        'yoshida-4': None,
-        #'RK4': None,
+        #'Energy-conserving-1': None,
+        #'yoshida-4': None,
+        #'AVF': None,
         'stormer-verlet-pseudo': None,
         #'gauss-legendre': None,
         #'candy-neri6': None,
-        #'RK4': None,
+        'RK4': None,
     }
 
     u_quiver, v_quiver = [], [] 
     for method in implemented_methods.keys():
         solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                   ny, T, nt, initial_u, initial_v, step_method=method,
-                                  boundary_conditions='homogeneous-neumann',
+                                  #boundary_conditions='homogeneous-neumann',
+                                  boundary_conditions='special-kink-bc',
                                   #c2 = lambda X, Y: .1 * torch.exp(-(X ** 2 + Y ** 2)),
                                   #c2 = lambda X, Y: torch.exp(-(1/X**2 + 1/Y**2)),
                                   snapshot_frequency=10,
@@ -1420,6 +1558,17 @@ if __name__ == '__main__':
                                   enable_energy_control=False,
                                   device='cpu')
         solver.evolve()
+        #plot_density_flux(solver.X[1:-1,1:-1].cpu().numpy(), solver.Y[1:-1,1:-1].cpu().numpy(),
+        #        solver.energy_density(solver.u[-1], solver.v[-1]),
+        #        solver.energy_flux(solver.u[-1], solver.v[-1]),
+        #        method
+        #        )
+        animate_density_flux(solver.X[1:-1,1:-1].cpu().numpy(), solver.Y[1:-1,1:-1].cpu().numpy(),
+                [solver.energy_density(solver.u[i], solver.v[i]).cpu().numpy() for i in range(solver.num_snapshots)],
+                [solver.energy_flux(solver.u[i], solver.v[i]).cpu().numpy() for i in range(solver.num_snapshots)], 
+                method, solver.num_snapshots
+                )
+
         implemented_methods[method] = solver.u.clone().cpu().numpy()
         #animate(
         #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
@@ -1443,7 +1592,7 @@ if __name__ == '__main__':
     #plt.legend()
     #plt.show()
 
-    plot_energy(solver,
+    plot_energy_with_err(solver,
             torch.stack([torch.tensor(u) for u in u_quiver]),
             torch.stack([torch.tensor(v) for v in v_quiver]),
             list(implemented_methods.keys()))
