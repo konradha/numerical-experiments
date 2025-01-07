@@ -676,16 +676,18 @@ class SineGordonIntegrator(torch.nn.Module):
         t2 = grad_u[0] * grad_u[0] + grad_u[1] * grad_u[1] 
         return t1 + t2.reshape((self.nx-2, self.nx-2))
 
-    def neumann_bc(self, u, v, i, tau=None):
+    def neumann_bc(self, u, v, i, tau=None,):
         u[0, 1:-1] = u[1, 1:-1]
         u[-1, 1:-1] = u[-2, 1:-1]
         u[:, 0] = u[:, 1]
         u[:, -1] = u[:, -2]
-
+ 
         v[0, 1:-1] = 0
         v[-1, 1:-1] = 0
         v[1:-1, 0] = 0
         v[1:-1, -1] = 0
+
+
 
     def special_kink_bc(self, u, v, i, tau=None):
         
@@ -940,7 +942,150 @@ class SineGordonIntegrator(torch.nn.Module):
         def get_A():
             return build_D2(self.nx-2, self.ny-2, self.dx, self.dy, self.dtype)
 
-        return u, v, []
+        def fun(u, v):
+            return self.energy_density(u, v)
+
+        def fac(n):
+            if n <= 1: return 1
+            s = 1
+            for i in range(2, n+1):
+                s *= i
+            return s
+        dx = torch.tensor(self.dx)
+        dy = torch.tensor(self.dy)
+
+        # first order only for phi_l(K) @ x
+        def apply_phi0(x, order=3):
+            return x
+
+        def apply_phi1(x, order=3):
+            return x 
+           
+        def apply_phi2(x, order=3):
+            return .5 * x  
+
+        def u_next(u, un, v, dg):
+            t1 = apply_phi0(u)
+            t2 = apply_phi1(v)
+            t3 = apply_phi2(dg) 
+            return t1 + self.dt * t2 - self.dt ** 2 * t3
+
+        def v_next(u, un, v, dg):
+            t1 = u_xx_yy(self.buf, apply_phi1(u), torch.tensor(self.dx), torch.tensor(self.dy))
+            t2 = apply_phi0(v)
+            t3 = apply_phi1(dg)
+            return -self.dt * t1 + t2 - self.dt * t3
+
+        def neumann_bc(u, v):
+            un, vn = u.clone(), v.clone()
+            un[0, 1:-1] = u[1, 1:-1]
+            un[-1, 1:-1] = u[-2, 1:-1]
+            un[:, 0] = u[:, 1]
+            un[:, -1] = u[:, -2]
+ 
+            vn[0, 1:-1] = 0
+            vn[-1, 1:-1] = 0
+            vn[1:-1, 0] = 0
+            vn[1:-1, -1] = 0
+            return un, vn
+
+        def solve(u, v):
+            un = u + self.dt * v 
+               
+            max_iter = 10
+            alpha = 1. 
+            for curr in range(max_iter):     
+                un.requires_grad_(True) 
+                dg = (self.grad_Vq(un) - self.grad_Vq(u))    
+
+                unn = u_next(u, un, v, dg)
+                vnn = v_next(u, un, v, dg)  
+ 
+                if (self.energy(u, v) - self.energy(unn, vnn)).norm() < 1e-6:
+                    break
+
+                r_u = unn - un
+                r_v = vnn - (v + self.dt * self.grad_Vq(un))
+
+                residual = torch.cat([r_u.ravel(), r_v.ravel()])
+                residual_norm = torch.norm(residual ** 2)
+                grad_u = torch.autograd.grad(residual_norm, un, retain_graph=True)[0]
+                with torch.no_grad():
+                    un = unn - grad_u
+                un = un.detach()
+            
+            vn = v + self.dt * self.grad_Vq(un)
+            return un, vn 
+
+        def fun(u, v, un, vn,):
+            dg = (self.grad_Vq(un) - self.grad_Vq(u))
+            y = torch.stack([torch.zeros_like(u), torch.zeros_like(v)])
+            y[0] = un - (apply_phi0(u) + self.dt * apply_phi1(v) - self.dt ** 2 * apply_phi2(dg))
+            y[1] = vn - (-self.dt * u_xx_yy(self.buf, apply_phi1(u), dx, dy) + apply_phi0(u) - self.dt * apply_phi1(dg))
+            return y
+
+
+        def solve_diff(u, v):
+            initial_u = u + self.dt * v
+            initial_v = v
+
+            max_iter = 5
+            un, vn = initial_u.clone(), initial_v.clone()
+            un = un.requires_grad_(True)
+            vn = vn.requires_grad_(True)
+            N = u.shape[0] * u.shape[1]
+            for it in range(max_iter):
+                r1, r2 = fun(u, v, un, vn)
+                r_norm = torch.norm(r1 ** 2 + r2 ** 2)
+                if r_norm < 1e-6:
+                    break
+                r1 = r1.reshape(-1)
+                r2 = r2.reshape(-1)
+
+                J11 = torch.zeros((N, N), dtype=self.dtype) 
+                J12 = torch.zeros((N, N), dtype=self.dtype)
+                J21 = torch.zeros((N, N), dtype=self.dtype)
+                J22 = torch.zeros((N, N), dtype=self.dtype)
+
+                
+                for e in range(N):
+                    if un.grad is not None: un.grad.zero_()
+                    if vn.grad is not None: vn.grad.zero_()
+
+                    r1[e].backward(retain_graph=True)
+
+                    if un.grad is not None:
+                        J11[:, e] = un.grad.reshape(-1)
+                    if vn.grad is not None:
+                        J12[:, e] = vn.grad.reshape(-1)
+
+                    r2[e].backward(retain_graph=True)
+                    if un.grad is not None:
+                        J21[:, e] = un.grad.reshape(-1)
+                    if vn.grad is not None:
+                        J22[:, e] = vn.grad.reshape(-1)
+
+                # this matrix is singular unfortunately
+                J = torch.cat([
+                    torch.cat([J11, J12], dim=1),
+                    torch.cat([J21, J22], dim=1),])
+                R = torch.cat([r1, r2])
+
+               
+
+                d = torch.linalg.solve(J, -R)
+                du = d[:N].reshape((self.nx, self.ny))
+                dv = d[N:].reshape((self.nx, self.ny))
+
+                with torch.no_grad():
+                    un = torch.tensor(un + du, requires_grad=True,)
+                    vn = torch.tensor(vn + dv, requires_grad=True,)
+            return un, vn
+
+        un, vn = solve_diff(u, v)
+        #print("E diff:", torch.norm(self.energy(un, vn) - self.energy(u, v))) 
+        
+        return un, vn, []
             
 
     def avf_explicit_step(self, u, v, last_k, i):
@@ -1297,7 +1442,8 @@ class SineGordonIntegrator(torch.nn.Module):
             if i == 0:
                 continue  # we already initialized u0, v0
             u, v, last_k = self.step(u, v, last_k, i)
-            self.apply_bc(u, v, i)
+            with torch.no_grad():
+                self.apply_bc(u, v, i,)
 
             if i % self.snapshot_frequency == 0:
                 self.u[i // self.snapshot_frequency] = u
@@ -1520,27 +1666,27 @@ def animate_density_flux(X, Y, densities, fluxes, name, num_snapshots):
 
 if __name__ == '__main__':
     L = 3
-    nx = ny = 256
+    nx = ny = 30
     T = 10
     nt = 1000
-    #initial_u = ring_soliton_center#static_breather 
-    #initial_v = zero_velocity
+    initial_u = static_breather 
+    initial_v = zero_velocity
 
-    initial_u = kink
-    initial_v = kink_start
+    #initial_u = kink
+    #initial_v = kink_start
     
     implemented_methods = {
         #'ETD2-sparse': None,
-        #'ETD1-sparse-opt': None,
+        'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
         #'Strang-split': None,
         #'HBVM': None,
         #'Strang-split': None,
         #'Energy-conserving-1': None,
-        #'yoshida-4': None,
+        'yoshida-4': None,
         #'AVF': None,
         'stormer-verlet-pseudo': None,
-        #'gauss-legendre': None,
+        'gauss-legendre': None,
         #'candy-neri6': None,
         'RK4': None,
     }
@@ -1549,8 +1695,8 @@ if __name__ == '__main__':
     for method in implemented_methods.keys():
         solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                   ny, T, nt, initial_u, initial_v, step_method=method,
-                                  #boundary_conditions='homogeneous-neumann',
-                                  boundary_conditions='special-kink-bc',
+                                  boundary_conditions='homogeneous-neumann',
+                                  #boundary_conditions='special-kink-bc',
                                   #c2 = lambda X, Y: .1 * torch.exp(-(X ** 2 + Y ** 2)),
                                   #c2 = lambda X, Y: torch.exp(-(1/X**2 + 1/Y**2)),
                                   snapshot_frequency=10,
@@ -1563,20 +1709,21 @@ if __name__ == '__main__':
         #        solver.energy_flux(solver.u[-1], solver.v[-1]),
         #        method
         #        )
-        animate_density_flux(solver.X[1:-1,1:-1].cpu().numpy(), solver.Y[1:-1,1:-1].cpu().numpy(),
-                [solver.energy_density(solver.u[i], solver.v[i]).cpu().numpy() for i in range(solver.num_snapshots)],
-                [solver.energy_flux(solver.u[i], solver.v[i]).cpu().numpy() for i in range(solver.num_snapshots)], 
-                method, solver.num_snapshots
-                )
+        with torch.no_grad():
+            animate_density_flux(solver.X[1:-1,1:-1].cpu().numpy(), solver.Y[1:-1,1:-1].cpu().numpy(),
+                    [solver.energy_density(solver.u[i], solver.v[i]).cpu().numpy() for i in range(solver.num_snapshots)],
+                    [solver.energy_flux(solver.u[i], solver.v[i]).cpu().numpy() for i in range(solver.num_snapshots)], 
+                    method, solver.num_snapshots
+                    )
 
-        implemented_methods[method] = solver.u.clone().cpu().numpy()
-        #animate(
-        #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
-        #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
+            implemented_methods[method] = solver.u.clone().cpu().numpy()
+            #animate(
+            #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
+            #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
 
-        u, v = solver.u.clone().cpu().numpy(), solver.v.clone().cpu().numpy()
-        u_quiver.append(u)
-        v_quiver.append(v)
+            u, v = solver.u.clone().cpu().numpy(), solver.v.clone().cpu().numpy()
+            u_quiver.append(u)
+            v_quiver.append(v)
 
  
     #    es = []
