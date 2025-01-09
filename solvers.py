@@ -357,6 +357,25 @@ def analytical_kink_solution(x, y, t):
     else:
         return 4 * np.atan(np.exp( x + y - t))
 
+def circular_ring(x, y):
+    return 2 * torch.atan(torch.exp(3 - 5 * torch.sqrt(x ** 2 + y ** 2)))
+
+def lapl_eigenvalues(nx, ny, dx, dy, tau):
+    # findable from REU paper using google search
+    ev = torch.zeros((nx, ny))
+    Nx = int(1 / dx) 
+    Ny = int(1 / dy)
+    Lx = nx * dx
+    Ly = ny * dy
+    norm = dx * dy
+    tau = tau ** 2
+    for i in range(nx):
+        for j in range(ny):
+            ev[i, j] = (4/norm) * (
+                    torch.sin(torch.tensor(tau ** 2 * torch.pi * i / Nx)) ** 2 + torch.sin(torch.tensor(tau ** 2 * torch.pi * j / Ny)) ** 2
+                    )
+    return ev
+
 
 class SineGordonIntegrator(torch.nn.Module):
     """
@@ -400,6 +419,11 @@ class SineGordonIntegrator(torch.nn.Module):
             'AVF': self.avf_step,
             'AVF-explicit': self.avf_explicit_step,
             'HBVM': self.hbvm_step,
+            'newmark': self.newmark_step,
+            'gautschi-erkn': self.gautschi_erkn_step,
+            'erkn-3': self.erkn3_step,
+            'etd-spectral': self.etd_spectral_step,
+            'linear-DG': self.linear_energy_conserving_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
@@ -423,6 +447,11 @@ class SineGordonIntegrator(torch.nn.Module):
             'AVF': None,
             'AVF-explicit': None,
             'HBVM': None,
+            'newmark': None,
+            'gautschi-erkn': None,
+            'erkn-3': None,
+            'etd-spectral': None,
+            'linear-DG': None,
         }
 
         implemented_boundary_conditions = {
@@ -505,6 +534,7 @@ class SineGordonIntegrator(torch.nn.Module):
 
         self.buf = torch.zeros((self.nx, self.ny)).to(self.device)
 
+        self.iteration_stats = None
         if 'ETD' in step_method:
             """
             This evolution uses approximations of exp(tau * L) where L is a block-sparse matrix
@@ -635,7 +665,7 @@ class SineGordonIntegrator(torch.nn.Module):
                     u, torch.tensor(self.dx, dtype=self.dtype)) + u_yy(
                         u, torch.tensor(self.dy, dtype=self.dtype))) - self.m * torch.sin(u)
 
-    def energy(self, u, v):
+    def energy_approx(self, u, v):
         # a crude approximation for the energy integral of the Hamiltonian
         # TODO build more accurate version for analysis purposes
         ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * self.dx)
@@ -649,6 +679,18 @@ class SineGordonIntegrator(torch.nn.Module):
         # TODO incorporate c, m here 
         integrand = torch.sum((ux2 + uy2) + ut2 + (cos))
         return 0.5 * integrand * self.dx * self.dy
+
+    def energy(self, u, v):
+        ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * self.dx)
+        uy = (u[2:, 1:-1] - u[:-2, 1:-1]) / (2. * self.dy)
+        ut = v[1:-1, 1:-1]
+        ux2 = .5 * ux ** 2
+        uy2 = .5 * uy ** 2
+        ut2 = .5 * ut ** 2
+        cos = self.m * (1 - torch.cos(u[1:-1, 1:-1])) 
+        integrand = torch.sum((ux2 + uy2) + ut2 + (cos))
+        return 0.5 * integrand * self.dx * self.dy
+
 
     def energy_density(self, u, v):
         ux = (u[1:-1, 2:] - u[1:-1, :-2]) / (2. * self.dx)
@@ -1082,9 +1124,100 @@ class SineGordonIntegrator(torch.nn.Module):
                     vn = torch.tensor(vn + dv, requires_grad=True,)
             return un, vn
 
-        un, vn = solve_diff(u, v)
-        #print("E diff:", torch.norm(self.energy(un, vn) - self.energy(u, v))) 
-        
+        def cos_diff(un, u): 
+                diff = un - u
+                mask = torch.abs(diff) < 1e-6
+                safe_ratio = (torch.cos(un) - torch.cos(u)) / diff
+                taylor = -torch.sin((un + u) / 2)
+                return torch.where(mask, taylor, safe_ratio)
+
+        def solve_exact(u, v):
+            initial_u = u + self.dt * v
+            initial_v = v
+
+            max_iter = 100
+            un, vn = initial_u.clone(), initial_v.clone()
+ 
+            N = u.shape[0] * u.shape[1]
+
+            
+
+            def fun(u, v, un, vn):
+                unn = un - self.dt * (v + vn) / 2 
+                vnn = vn + self.dt * (-u_xx_yy(self.buf, (un - un) / 2, dx, dy) +
+                            - self.m * (cos_diff(un, u)))
+                return unn, vnn
+
+            def Jac(u, v, un, vn):
+                # Id
+                J11 = u
+                # - tau / 2 Id
+                J12 = -self.dt / 2 * v
+                # - tau / 2 (\Delta + m tau (-sin(un) + cos(un) / (un - u) ** 2)
+                #J21 = -self.dt / 2 * u_xx_yy(self.buf, u, dx, dy) + self.m * self.dt * (
+                #        (-(torch.sin(un)  + torch.cos(un) / (u - un) ** 2))
+                #        )
+                J21 = -self.dt / 2 * u_xx_yy(self.buf, u, dx, dy) + self.m * self.dt * (-cos_diff(un, u))
+                # Id
+                J22 = v
+                
+                return J11, J12, J21, J22
+
+            def mult_Jac(u, v, un, vn):
+                J11, J12, J21, J22 = Jac(u, v, un, vn)
+
+                top = J11 * u + J12 * v 
+                bot = J21 * u + J22 * v
+
+                return torch.stack([top, bot])
+            
+            for it in range(max_iter):
+
+                Jw = mult_Jac(u, v, un, vn)
+                import pdb; pdb.set_trace()
+
+                #r_u = torch.max((un - u).abs())
+                #r_v = torch.max((un - u).abs())
+                #if max(r_u, r_v) < 1e-6:
+                #    break
+            success = ((it + 1) != max_iter) 
+            return un, vn, success
+
+        def loss_fn(u, v, un, vn):
+            r_u = (un - u) / self.dt - (vn + v) / 2
+            r_v = -u_xx_yy(self.buf, (un + u) / 2, dx, dy) - self.m * cos_diff(un, vn)
+            f1 = torch.sum(r_u ** 2 + r_v ** 2)  
+            f2 = torch.norm(self.energy(u, v) - self.energy(un, vn)) ** 2
+            return f1 + f2
+
+        def solve_opt(u, v):
+            un = u + self.dt * v
+            vn = v
+            u_next = un.clone().detach().requires_grad_(True)
+            v_next = vn.clone().detach().requires_grad_(True)
+            optimizer = torch.optim.LBFGS(
+                    [u_next, v_next],
+                    max_iter=2,
+                    line_search_fn="strong_wolfe")
+            max_iter = 10
+
+            def closure():
+                optimizer.zero_grad()
+                loss = loss_fn(un, vn, u_next, v_next)
+                loss.backward(retain_graph=True)
+                return loss
+
+            for it in range(max_iter):
+                loss = optimizer.step(closure)
+                if loss.item() < 1e-3:
+                    break
+            return u_next, v_next
+
+
+        un, vn= solve(u, v)
+        #if not converged:
+        #    print("Fixed point iteration failed in AVF integrator")
+        ##print("E diff:", torch.norm(self.energy(un, vn) - self.energy(u, v)))  
         return un, vn, []
             
 
@@ -1141,6 +1274,203 @@ class SineGordonIntegrator(torch.nn.Module):
                 break
 
         return u_np1, p_np1, []
+
+    def newmark_step(self, u, v, last_k, i):
+        # broken
+        # needs parameters gamma, beta
+        if i == 1:
+            a1 = -self.grad_Vq(u)
+            un = u + self.dt * v + .5 * self.dt ** 2 * a1
+            vn = v + self.dt * a1
+            return un, vn, [a1]
+
+        a_old = last_k[0]
+        an = -self.grad_Vq(u)
+        un = u + self.dt * v + .5 * self.dt ** 2 
+        vn = v + self.dt * an
+        anew = -self.grad_Vq(un)
+        return un, vn, [anew]
+
+
+    def gautschi_erkn_step(self, u, v, last_k, i):
+        # kind of like stormer-verlet, with filtering 
+        if i == 1:
+            # build_D2(nx, ny, dx, dy, dtype)
+            self.ev = lapl_eigenvalues(self.nx, self.ny, self.dx, self.dy, self.dt).real
+            self.ev = self.ev.reshape((self.nx, self.nx))
+            self.ev_half = lapl_eigenvalues(self.nx, self.ny, self.dx, self.dy, self.dt/2).real
+            self.ev_half = self.ev.reshape((self.nx, self.nx))
+
+            self.kx = 2 * torch.pi * torch.fft.fftfreq(self.nx, self.dx, device=u.device)
+            self.ky = 2 * torch.pi * torch.fft.fftfreq(self.ny, self.dy, device=u.device)
+            self.KX, self.KY = torch.meshgrid(self.kx, self.ky, indexing='xy')
+
+            vn = v + self.dt * self.grad_Vq(u)
+            un = u + self.dt * vn
+            return un, vn, [u]
+
+        def sinc(x):
+            return torch.where(x != 0, torch.sin(x) / x, torch.ones_like(x))
+
+        def sinc2(x):
+            return sinc(x) ** 2
+
+        # maybe we can save this (or avoid the PBC assumption)
+        # by introducing some smart padding
+        def spectral_op(
+                u: torch.Tensor,
+                op, # Callable
+                t: float,
+                dx: float,
+                dy: float,
+                eps: float = 1e-14  
+            ) ->         torch.Tensor: 
+            KX, KY = self.KX, self.KY 
+            ny, nx = u.shape
+
+            # |ξ| = √(ξ_x² + ξ_y²)
+            xi_magnitude = torch.sqrt(KX**2 + KY**2)
+            buffer_freq = torch.fft.fft2(u)
+
+            # make sure to have t correctly scaled!
+            multiplier = op(t * xi_magnitude) 
+            buffer_freq *= multiplier
+            return torch.real(torch.fft.ifft2(buffer_freq))
+             
+        def spectral_step(u, v, last_k):
+            t1 = 2 * spectral_op(u, torch.cos, self.dt, self.dx, self.dy,)
+            
+            g_intern = spectral_op(u, sinc, self.dt, self.dx, self.dy,)
+            g = torch.sin(g_intern)
+            t2 = spectral_op(g, sinc2, self.dt / 2, self.dx, self.dy,)
+
+            u_past = last_k[-1] 
+            un = t1 - u_past + self.dt ** 2 * t2
+            vn = (un - u) / self.dt
+            return un, vn
+
+        def pseudo_analytical_step(u, v, last_k):
+            # u_{n+1} = 2 cos(t \Omega) u - u_past - t² sinc²(t/2 \Omega) g (phi(t \Omega) u)
+
+            def phi(x):
+                return torch.sinc(x / 2) ** 2
+
+            u_past = last_k[-1]
+
+            t1 = 2 * torch.cos(torch.sqrt(self.ev)) * u 
+            t2 = u_past
+            t3_s = sinc2(torch.sqrt(self.ev_half)) * (-torch.sin(phi(torch.sqrt(self.ev_half)) * u))
+
+            un = t1 - t2 + self.dt ** 2 * t3_s
+            vn = (un - u) / self.dt
+            return un, vn
+
+        un, vn = pseudo_analytical_step(u, v, last_k) 
+        return un, vn, [u]
+
+    def etd_spectral_step(self, u, v, last_k, i):
+        nx, ny = u.shape
+        device = u.device
+        if i == 1:
+            kx = fft.fftfreq(nx, d=1/nx).to(device)
+            ky = fft.fftfreq(ny, d=1/ny).to(device)
+            self.kx, self.ky = torch.meshgrid(kx, ky, indexing='ij')
+            self.k_squared = self.kx**2 + self.ky**2
+
+            Lx = self.dx * self.nx
+            Ly = self.dy * self.ny
+
+            self.k_squared *= 4 / (Lx * Ly)
+            self.k_squared[0, 0] = 1.0 
+
+            self.exp_term = torch.exp(-self.k_squared * self.dt)
+            self.phi_term = (1 - self.exp_term) / self.k_squared
+
+        u_hat = fft.fftn(u)
+        v_hat = fft.fftn(v)
+        g_u = -torch.sin(u)
+        g_u_hat = fft.fftn(g_u)
+        u_next_hat = self.exp_term * u_hat + self.phi_term * v_hat
+        v_next_hat = -self.k_squared * self.phi_term * u_hat + self.exp_term * v_hat + self.phi_term * g_u_hat
+        u_next = fft.ifftn(u_next_hat).real
+        v_next = fft.ifftn(v_next_hat).real
+        u_next[0, 0] = u[0, 0] + self.dt * v[0, 0]
+        v_next[0, 0] = v[0, 0] + self.dt * g_u[0, 0]
+        return u_next, v_next, []
+
+    def erkn3_step(self, u, v, last_k, i):
+        k1 = self.grad_Vq(u)
+        u_half = u + 0.5*self.dt*v + 0.125*(self.dt**2)*k1
+        k2 = self.grad_Vq(u_half)
+        un = u + self.dt*v + (self.dt**2/6)*(k1 + 2*k2)
+        vn = v + (self.dt/6)*(k1 + 4*k2 + self.grad_Vq(un))
+        return un, vn, []
+
+
+    def linear_energy_conserving_step(self, u, v, last_k, i):
+        def torch_sparse_to_scipy_sparse(torch_sparse, shape): 
+            indices = torch_sparse.indices().cpu().numpy()
+            values = torch_sparse.values().cpu().numpy()
+
+            scipy_sparse = sp.coo_matrix(
+                (values, (indices[0], indices[1])),
+                shape=shape
+            )
+            return scipy_sparse.tocsr()
+
+        if i == 1:
+            a1 = -self.grad_Vq(u)
+            un = u + self.dt * v + .5 * self.dt ** 2 * a1
+            vn = v + self.dt * a1
+            L = build_D2(self.nx-2, self.ny-2, self.dx, self.dy, dtype=self.dtype).coalesce()
+            L_scipy = torch_sparse_to_scipy_sparse(L, ((self.nx) ** 2, (self.nx) ** 2)) 
+            I = sp.eye(self.nx * self.nx, format='csr')
+            self.lhs_op = (2 / self.dt ** 2) * I - .5 * L_scipy 
+            self.iteration_stats = []
+            return un, vn, []
+
+        def cos_diff(un, u): 
+            diff = un - u
+            mask = torch.abs(diff) < 1e-6
+            safe_ratio = (torch.cos(un) - torch.cos(u)) / diff
+            t = -torch.sin((un + u) / 2)
+            return torch.where(mask, t, safe_ratio)
+        dx = torch.tensor(self.dx)
+        dy = torch.tensor(self.dy)
+
+        def k(u, v):
+            return (2 * u / self.dt + 2 * v) / self.dt
+
+        def contraction_rhs(u, v, um):
+            cd  = cos_diff(um, u)
+            lap = u_xx_yy(self.buf, u, dx, dy)
+            kuv = k(u, v) 
+            return cd + .5 * lap + kuv
+
+        def contraction_lhs(u):
+            d   = 2 * u / self.dt ** 2
+            lap = u_xx_yy(self.buf, u, dx, dy)
+            return d - .5 * lap
+    
+        def contract(u, v,):
+            max_iter = 10
+            un, vn, [] = u + self.dt * v, v, []
+            w = 1
+            for it in range(max_iter):
+                u_old = un.clone()
+                rhs = contraction_rhs(u, v, un)
+                rhs = rhs.reshape(self.nx ** 2).cpu().numpy()
+                un = spla.spsolve(self.lhs_op, rhs)
+                un = torch.from_numpy(un).reshape((self.nx, self.nx))
+                if torch.norm(un - u_old) < 1e-6:
+                    break
+            
+            self.iteration_stats.append(it) 
+            vn =  2 * (un - u) / self.dt - v 
+            return un, vn
+
+        un, vn = contract(u, v,)
+        return un, vn, []
 
 
     def eec_sparse_step(self, u, v, last_k, i):
@@ -1215,8 +1545,6 @@ class SineGordonIntegrator(torch.nn.Module):
         #u_new = u + self.dt * v_new
        
         #return u_new, v_new, [v_new]
-
-
 
 
     def etd1_sparse_step(self, u, v, last_k, i):
@@ -1665,11 +1993,11 @@ def animate_density_flux(X, Y, densities, fluxes, name, num_snapshots):
 
 
 if __name__ == '__main__':
-    L = 3
-    nx = ny = 30
+    L = 4
+    nx = ny = 50
     T = 10
     nt = 1000
-    initial_u = static_breather 
+    initial_u = circular_ring# static_breather 
     initial_v = zero_velocity
 
     #initial_u = kink
@@ -1677,18 +2005,20 @@ if __name__ == '__main__':
     
     implemented_methods = {
         #'ETD2-sparse': None,
-        'ETD1-sparse-opt': None,
+        #'ETD1-sparse-opt': None,
         #'ETD1-krylov': None,
         #'Strang-split': None,
         #'HBVM': None,
         #'Strang-split': None,
         #'Energy-conserving-1': None,
-        'yoshida-4': None,
-        #'AVF': None,
+        #'yoshida-4': None,
+        #'gautschi-erkn': None,
+        #'etd-spectral': None,
         'stormer-verlet-pseudo': None,
-        'gauss-legendre': None,
+        'linear-DG': None, 
+        #'gauss-legendre': None,
         #'candy-neri6': None,
-        'RK4': None,
+        #'RK4': None,
     }
 
     u_quiver, v_quiver = [], [] 
@@ -1704,6 +2034,10 @@ if __name__ == '__main__':
                                   enable_energy_control=False,
                                   device='cpu')
         solver.evolve()
+        if solver.iteration_stats:
+            print(solver.iteration_stats)
+
+
         #plot_density_flux(solver.X[1:-1,1:-1].cpu().numpy(), solver.Y[1:-1,1:-1].cpu().numpy(),
         #        solver.energy_density(solver.u[-1], solver.v[-1]),
         #        solver.energy_flux(solver.u[-1], solver.v[-1]),
@@ -1717,9 +2051,9 @@ if __name__ == '__main__':
                     )
 
             implemented_methods[method] = solver.u.clone().cpu().numpy()
-            #animate(
-            #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
-            #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
+        #    #animate(
+        #    #        solver.X.cpu().numpy(), solver.Y.cpu().numpy(),
+        #    #        solver.u, solver.dt, solver.num_snapshots, solver.nt, method)
 
             u, v = solver.u.clone().cpu().numpy(), solver.v.clone().cpu().numpy()
             u_quiver.append(u)
@@ -1750,8 +2084,8 @@ if __name__ == '__main__':
     #        solver.tn.cpu().numpy()[::solver.snapshot_frequency],
     #        list(implemented_methods.keys()))
 
-    plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
-    lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
+    #plot_phase_diagram_quiver(u_quiver, v_quiver, list(implemented_methods.keys()))
+    #lyapunov_exponent(u_quiver, solver.tn.cpu().numpy()[::solver.snapshot_frequency][1:], list(implemented_methods.keys()) )
 
     #animate_comparison_with_kink_solution(solver.X, solver.Y, implemented_methods, solver.dt,
     #        solver.num_snapshots, solver.nt,)
