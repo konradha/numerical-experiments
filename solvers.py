@@ -383,6 +383,11 @@ def analytical_kink_solution(x, y, t):
 def circular_ring(x, y):
     return 2 * torch.atan(torch.exp(3 - 5 * torch.sqrt(x ** 2 + y ** 2)))
 
+def lbf_circular_ring(x, y):
+    r2 = x ** 2 + y ** 2
+    alpha = 4
+    return alpha * torch.arctan(torch.exp(3 - torch.sqrt(r2)))
+
 def lapl_eigenvalues(nx, ny, dx, dy, tau=None):
     # findable from REU paper using google search
     ev = torch.zeros((nx, ny))
@@ -394,7 +399,7 @@ def lapl_eigenvalues(nx, ny, dx, dy, tau=None):
     if tau is None: tau = 1
     for i in range(-nx//2, nx//2):
         for j in range(-ny//2, ny // 2): 
-            ev[i, j] = -4 * np.pi ** 2 / (nx ** 2 * dx ** 2) * (i ** 2 + j ** 2)
+            ev[i, j] = 4 * np.pi ** 2 / (nx ** 2 * dx ** 2) * (i ** 2 + j ** 2)
             #ev[i, j] = -(4 /nx/ny) * (
             #        torch.sin(torch.tensor(tau * torch.pi * i / nx / 2)) ** 2 + torch.sin(tau * torch.tensor(torch.pi * j / ny / 2)) ** 2
             #        )
@@ -453,6 +458,8 @@ class SineGordonIntegrator(torch.nn.Module):
             'avf-4th-fixed-point': self.avf_fixed_point_step,
             'bratsos-corrector': self.bratsos_explicit_step, # amounts to Stormer-Verlet
             'bratsos-implicit': self.bratsos_corrector_step,
+            'crank-nicholson': self.crank_nicholson_step,
+            'lattice-boltzmann': self.lbm_step,
         }
         save_last_k = {
             'stormer-verlet-pseudo': 0,
@@ -486,6 +493,8 @@ class SineGordonIntegrator(torch.nn.Module):
             'avf-4th-fixed-point': None,
             'bratsos-corrector': None,
             'bratsos-implicit': None,
+            'crank-nicholson': None,
+            'lattice-boltzmann': None,
         }
 
         implemented_boundary_conditions = {
@@ -1398,7 +1407,138 @@ class SineGordonIntegrator(torch.nn.Module):
          
         return un, vn, []
 
+    def lbm_step(self, u, v, last_k, i):
+        # kick off ???? 
+        #v = self.grad_Vq(u)
+    
 
+        def grad(u):
+            dx = torch.tensor(self.dx)
+            dy = torch.tensor(self.dy)
+            u_x, u_y = torch.zeros_like(u), torch.zeros_like(u)
+            u_x[:, 1:-1] = (u[:, 2:] - u[:, :-2]) / (2 * dx)
+            u_x[:, 0] = (u[:, 1] - u[:, 0]) / dx
+            u_x[:, -1] = (u[:, -1] - u[:, -2]) / dx
+    
+            u_y[1:-1, :] = (u[2:, :] - u[:-2, :]) / (2 * dy)
+            u_y[0, :] = (u[1, :] - u[0, :]) / dy
+            u_y[-1, :] = (u[-1, :] - u[-2, :]) / dy
+            return u_x, u_y
+
+        def feq(u, u_t,):
+            assert u.shape == u_t.shape
+            nx, ny = u.shape
+            f = torch.zeros((nx, ny, self.l), dtype=self.dtype)
+            ux, uy = grad(u) 
+            #u_diff_expanded = self.cs ** 2 * (u - u_t).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 2, 2)
+            scaled_id = self.cs ** 2 * torch.eye(2, dtype=self.dtype)
+            u_expanded   = u.unsqueeze(-1).unsqueeze(-1) 
+            u_t_expanded = u_t.unsqueeze(-1).unsqueeze(-1)
+
+
+            for j, cxy in zip(self.d_idx, self.cxys):   
+                cjcj = torch.outer(cxy, cxy)
+                diff_expanded   = (cjcj - scaled_id).unsqueeze(0).unsqueeze(1) 
+                double_dot = (self.cs ** 2 * (u_expanded - u_t_expanded) * diff_expanded).sum(dim=(-2, -1)) 
+                f[:, :, j] = self.weights[j] * (u_t + double_dot / (2 * self.cs ** 4))
+            return f
+
+        def F(u):
+            nx, ny = u.shape
+            term = torch.zeros((nx, ny, self.l), dtype=self.dtype)
+            return self.weights.view(1, 1, -1) * u.unsqueeze(-1)
+            #for j in range(self.l):
+            #    term[:, :, j] = self.weights[j] * u
+            #return term
+
+        # D2EQ
+        self.l = 9
+        self.d_idx = torch.arange(self.l)
+        self.d_idx_p = torch.tensor([0, 5, 6, 7, 8, 1, 2, 3, 4])
+ 
+        if i == 1:     
+            # some constants we need
+            self.c = max(self.dx, self.dy) / self.dt
+            self.cs = np.sqrt(self.c ** 2 / 3)
+            self.tau = .5 + 1 / (self.dt *  self.cs ** 2) 
+            # too much 
+            #self.tau = 1e5 * (.5 + 1 / self.cs ** 2)
+
+
+            
+
+            self.cxs       = self.c * torch.tensor([0, 0, 1, 1, 1, 0,-1,-1,-1], dtype=self.dtype)
+            self.cys       = self.c * torch.tensor([0, 1, 1, 0,-1,-1,-1, 0, 1], dtype=self.dtype)
+            self.cxys      = torch.vstack((self.cxs, self.cys)).T
+            self.weights   = torch.tensor([4/9,1/9,1/36,1/9,1/36,1/9,1/36,1/9,1/36], dtype=self.dtype)
+
+            self.dxdy = torch.tensor([self.dx, self.dy], dtype=self.dtype)
+
+            # vec(dx) = eps c_j
+            m = self.dxdy / self.cxys == torch.inf
+            z = self.dxdy / self.cxys
+            z[m] = 0 
+            self.eps  = z
+
+            self.f_eq = feq(u, v)
+            self.f = 1 / self.tau * self.f_eq
+        
+            bdry_x = torch.logical_or(self.X == self.Lx_min, self.X == self.Lx_max)
+            bdry_y = torch.logical_or(self.Y == self.Ly_min, self.Y == self.Ly_max)
+            self.bdry_mask = torch.logical_or(bdry_x, bdry_y)
+
+            # sum_j w_j c_j == 0
+            assert torch.allclose(self.weights @ self.cxys, 1e-10 * torch.ones(2, dtype=self.dtype))
+            
+            # sum_j w_j c_j c_j.T == cs² Id
+            outers = torch.bmm(self.cxys.unsqueeze(2), self.cxys.unsqueeze(1))
+            z = (outers * self.weights.view(-1, 1, 1)).sum(dim=0)
+            assert torch.allclose(z, self.cs ** 2 * torch.eye(2, dtype=self.dtype))
+        
+        
+        boundary_f = self.f[self.bdry_mask, :] 
+        boundary_f = boundary_f[:, self.d_idx_p] # just take reflection at first
+        self.f_eq = feq(u, v)
+        # forget about second order for now
+        self.f = self.f - (1/self.tau) * (self.f - self.f_eq) +\
+                self.dt * F(-self.m * torch.sin(u)) + .5 * self.dt ** 2 * F(-self.m * torch.cos(u))
+        
+        self.f[self.bdry_mask, :] = boundary_f 
+        vn = torch.zeros_like(u)
+        for j in range(self.l):
+            vn += self.weights[j] * self.f[:, :, j] 
+        un = u + self.dt * vn
+
+       
+        return un, vn, []
+
+       
+
+    def crank_nicholson_step(self, u, v, last_k, i):
+        if i == 1:
+            L = build_D2(self.nx-2, self.ny-2, self.dx, self.dy, dtype=self.dtype).coalesce()
+            L_scipy = torch_sparse_to_scipy_sparse(L, ((self.nx) ** 2, (self.nx) ** 2)) 
+            I = sp.eye(self.nx * self.nx, format='csr')
+            self.Id = I
+            self.LHS1 = I - self.dt ** 2 / 2 * L_scipy
+            return self.stormer_verlet_step(u, v, last_k, i)
+
+        u_past = last_k[0]
+        dx, dy = torch.tensor(self.dx), torch.tensor(self.dy)
+        sin = torch.sin(u)
+        rhs = 2 * u - u_past + self.dt ** 2 / 2 * (u_xx_yy(self.buf, u, dx, dy) - self.m * sin)
+
+        rhs = rhs.reshape(self.nx ** 2).cpu().numpy()
+        
+        LHS = self.LHS1# + self.dt ** 2 * float(self.m) / 2 * self.Id @ sin.reshape(self.nx ** 2).cpu().numpy()
+
+        un = torch.from_numpy(spla.spsolve(LHS, rhs))
+        un = un.reshape((self.nx, self.nx))
+        vn = (un - u) / self.dt
+
+        return un, vn, [u]
+
+        
     def newmark_step(self, u, v, last_k, i):
         # broken
         # needs parameters gamma, beta
@@ -1482,23 +1622,16 @@ class SineGordonIntegrator(torch.nn.Module):
 
             def phi(x):
                 return torch.sinc(x / 2) ** 2
-
+            dx = torch.tensor(self.dx)
+            dy = torch.tensor(self.dy) 
             u_past = last_k[-1]
-
-            ###u = u.reshape(self.nx ** 2)
             u_hat = fft.fft2(u)
-            t1 = 2 * fft.ifft2(torch.cos(self.dt * torch.sqrt(-self.ev)) * u_hat).real 
+            t1 = 2 * fft.ifft2(torch.cos(self.dt * torch.sqrt(self.ev)) * u_hat).real 
             t2 = -u_past
-            t3_s = fft.fft2(torch.sin(fft.ifft2(phi(self.dt * torch.sqrt(-self.ev) * u_hat))))
-            t3 = -fft.ifft2(sinc2(self.dt / 2 * torch.sqrt(-self.ev)) * t3_s).real
-            
-
-
-            ##t1 = t1.reshape((self.nx, self.nx))
-            ##t2 = t2.reshape((self.nx, self.nx))
-            ##t3 = t3.reshape((self.nx, self.nx)) 
-            ##u = u.reshape((self.nx, self.nx))
-            un = t1 + t2 + self.dt ** 2 * t3
+            t3_s = fft.fft2(torch.sin(fft.ifft2(phi(self.dt * torch.sqrt(self.ev) * u_hat))))
+            t3 = -fft.ifft2(sinc2(self.dt / 4 * torch.sqrt(self.ev)) * t3_s).real
+             
+            un = t1 + t2 + self.dt ** 2 * t3 
             vn = (un - u) / self.dt
             return un, vn
  
@@ -1507,8 +1640,7 @@ class SineGordonIntegrator(torch.nn.Module):
             #lapl = self.ev0 * u_hat
             #sin_u = -self.m *torch.sin(u)
   
-            #dx = torch.tensor(self.dx)
-            #dy = torch.tensor(self.dy)
+            
             ##vn = v + self.dt * (u_xx_yy_9(self.buf, u, dx, dy) + sin_u)
             #vn = v + self.dt * (fft.ifft2(lapl).real + sin_u)
             #un = u + self.dt * vn
@@ -2146,7 +2278,7 @@ def animate_comparison(X, Y, data, dt, num_snapshots, nt,):
 
             axs[i].clear()
             axs[i].plot_surface(X, Y,
-                    viz_data,
+                    np.sin(viz_data / 2),
                     cmap='viridis')
             axs[i].set_title(f"{method_name}, t={(frame * dt * (nt / num_snapshots)):.2f}")
     fps = 300
@@ -2331,10 +2463,10 @@ def animate_density_flux(X, Y, densities, fluxes, name, num_snapshots):
 
 
 def convergence_study(methods=['stormer-verlet-pseudo'],):
-    initial_u = circular_ring 
+    initial_u =  circular_ring 
     initial_v = zero_velocity
 
-    T = 10
+    T = 3
 
     L = 4
     grid_range = [30, 40] 
@@ -2380,15 +2512,16 @@ def convergence_study(methods=['stormer-verlet-pseudo'],):
 
 
 if False:#__name__ == '__main__':
-    convergence_study(['AVF-explicit', 'stormer-verlet-pseudo'])
+    convergence_study(['gautschi-erkn', 'stormer-verlet-pseudo'])
 
 if __name__ == '__main__':
 
-    L = 4
-    nx = ny = 50
+    L = 3
+    nx = ny = 128
     T = 10
     nt = 1000
-    initial_u = circular_ring #static_breather 
+    # Gautschi integrator has issues with the static breather -- let's check why!
+    initial_u = circular_ring #static_breather #lbf_circular_ring 
     initial_v = zero_velocity
 
     #initial_u = kink
@@ -2404,6 +2537,8 @@ if __name__ == '__main__':
         #'Energy-conserving-1': None,
         #'yoshida-4': None,
         'gautschi-erkn': None,
+        #'crank-nicholson': None,
+        #'lattice-boltzmann': None,
         #'etd-spectral': None,
         'stormer-verlet-pseudo': None,
         #'avf-4th-fixed-point': None,
