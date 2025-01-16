@@ -2278,7 +2278,8 @@ def animate_comparison(X, Y, data, dt, num_snapshots, nt,):
 
             axs[i].clear()
             axs[i].plot_surface(X, Y,
-                    np.sin(viz_data / 2),
+                    viz_data,
+                    #np.sin(viz_data / 2),
                     cmap='viridis')
             axs[i].set_title(f"{method_name}, t={(frame * dt * (nt / num_snapshots)):.2f}")
     fps = 300
@@ -2480,7 +2481,8 @@ def convergence_study(methods=['stormer-verlet-pseudo'],):
                 nx = ny = n
                 solver = SineGordonIntegrator(-L, L, -L, L, nx,
                                           ny, T, nt, initial_u, initial_v, step_method=method,
-                                          boundary_conditions='homogeneous-neumann',
+                                          #boundary_conditions='homogeneous-neumann',
+                                          boundary_conditions='special-kink-bc',
                                           dtype=torch.float64,
                                           snapshot_frequency=10,
                                           c2 = 1,
@@ -2517,11 +2519,11 @@ if False:#__name__ == '__main__':
 if __name__ == '__main__':
 
     L = 3
-    nx = ny = 128
+    nx = ny = 32
     T = 10
     nt = 1000
     # Gautschi integrator has issues with the static breather -- let's check why!
-    initial_u = circular_ring #static_breather #lbf_circular_ring 
+    initial_u = circular_ring# static_breather# bubble # #static_breather #lbf_circular_ring 
     initial_v = zero_velocity
 
     #initial_u = kink
@@ -2536,7 +2538,7 @@ if __name__ == '__main__':
         #'Strang-split': None,
         #'Energy-conserving-1': None,
         #'yoshida-4': None,
-        'gautschi-erkn': None,
+        #'gautschi-erkn': None,
         #'crank-nicholson': None,
         #'lattice-boltzmann': None,
         #'etd-spectral': None,
@@ -2544,7 +2546,7 @@ if __name__ == '__main__':
         #'avf-4th-fixed-point': None,
         #'bratsos-implicit': None,
         #'bratsos-corrector': None,
-        #'linear-DG': None,
+        'linear-DG': None,
         #'locally-energy-conserving-implicit': None,
         #'modified-law': None,
         #'AVF-explicit': None, 
