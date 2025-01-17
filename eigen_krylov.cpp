@@ -37,32 +37,15 @@
       std::cout << std::endl;                                                  \
   }
 
-static const double THETA[] = {0.,
-                               2.220446049250313e-16,
-                               3.847473727e-01,
-                               6.375714478e-01,
-                               8.852561855e-01,
-                               1.127477894e+00,
-                               1.363950631e+00,
-                               1.595528769e+00,
-                               1.823161970e+00,
-                               2.047480191e+00,
-                               2.269059034e+00,
-                               2.488280198e+00,
-                               2.705461362e+00,
-                               2.920861859e+00,
-                               3.134706772e+00,
-                               3.347189767e+00,
-                               3.558484278e+00,
-                               3.768740244e+00,
-                               3.978096116e+00,
-                               4.186672495e+00,
-                               4.394576084e+00,
-                               4.601905143e+00,
-                               4.808746085e+00,
-                               5.015177108e+00,
-                               5.221266277e+00,
-                               5.427074274e+00};
+static const double THETA[] = {2.220446049250313e-16, 0.192373685,  0.38474737,
+                               0.6375714478,          0.8852561855, 1.127477894,
+                               1.363950631,           1.595528769,  1.82316197,
+                               2.047480191,           2.269059034,  2.488280198,
+                               2.705461362,           2.920861859,  3.134706772,
+                               3.347189767,           3.558484278,  3.768740244,
+                               3.978096116,           4.186672495,  4.394576084,
+                               4.601905143,           4.808746085,  5.015177108,
+                               5.221266277,           5.427074274};
 
 template <typename F, typename Scalar>
 concept ValidScalarLambda =
@@ -495,7 +478,6 @@ void gautschi_step_krylov(
   ubuf = Omega_scaled(Laplacian, un, tau);
 #if DEBUG
   std::cout << ubuf << "\n";
-  ;
 #endif
 
   ubuf = ubuf.array().unaryExpr(fun);
@@ -508,19 +490,35 @@ template <typename Float>
 std::tuple<Float, uint32_t> normAm(const Eigen::SparseMatrix<Float> &A,
                                    const uint32_t m) {
   const uint32_t n = A.rows();
-  const Eigen::SparseMatrix<Float> AT = A.transpose();
-  const uint32_t t = 1;
-  Eigen::VectorX<Float> x = Eigen::VectorX<Float>::Random(n);
-  x.normalize();
-  Eigen::VectorX<Float> v = x;
-  Eigen::VectorX<Float> w = x;
-  Float estimate = Float(0);
-  for (uint32_t j = 0; j < m; j++) {
-    v = A * v;
-    w = AT * w;
+  bool is_non_negative = true;
+  for (int k = 0; k < A.outerSize(); ++k) {
+    for (typename Eigen::SparseMatrix<Float>::InnerIterator it(A, k); it;
+         ++it) {
+      if (it.value() < 0) {
+        is_non_negative = false;
+        break;
+      }
+    }
+    if (!is_non_negative)
+      break;
   }
-  estimate = std::max(v.template lpNorm<1>(), w.template lpNorm<1>());
-  return {estimate, 2 * m * t};
+
+  if (is_non_negative) {
+    Eigen::VectorX<Float> e = Eigen::VectorX<Float>::Ones(n);
+    for (uint32_t j = 0; j < m; j++) {
+      e = A.transpose() * e;
+    }
+    return {e.template lpNorm<Eigen::Infinity>(), m};
+  } else {
+    const uint32_t t = 1;
+    Eigen::VectorX<Float> x = Eigen::VectorX<Float>::Random(n);
+    x.normalize();
+    Eigen::VectorX<Float> v = x;
+    for (uint32_t j = 0; j < m; j++) {
+      v = A * v;
+    }
+    return {v.template lpNorm<1>(), m * t};
+  }
 }
 
 template <typename Float> struct TaylorParams {
@@ -549,22 +547,31 @@ selectTaylorDegree(const Eigen::SparseMatrix<Float> &A,
   const Float sigma = flag ? 1.0 : 0.5;
   uint32_t mv = 0;
   const Float mu = A.diagonal().mean();
-  auto A_shifted = A;
-  A_shifted.diagonal().array() -= mu;
-  Float normA = A_shifted.coeffs().abs().sum();
-  Float bound = 2 * 2 * p_max * (p_max + 3) / (m_max * b.cols()) - 1;
+  // no need to shift, we only want case 5
+  // auto A_shifted = A;
+  // A_shifted.diagonal().array() -= mu;
+  // Float normA = A_shifted.coeffs().abs().sum();
+  // Float normA = A.coeffs().abs().sum();
+  Float normA = A.coeffs().abs().sum();
+
+  Float bound = 2 * p_max * (p_max + 3) / m_max - 1;
   Float c = std::pow(normA, sigma);
   bool bound_hold = false;
   Matrix M = Matrix::Zero(m_max, p_max - 1);
   Vector alpha(p_max - 1);
+
   if (c <= THETA[m_max - 1] * bound) {
+#if DEBUG
+    std::cout << "Bound should hold, alpha=" << Vector::Constant(p_max - 1, c)
+              << "\n";
+#endif
     alpha = Vector::Constant(p_max - 1, c);
     bound_hold = true;
   }
   if (!bound_hold) {
     Vector eta = Vector::Zero(p_max);
     for (uint32_t p = 1; p <= p_max; p++) {
-      const auto [est, k] = normAm(A_shifted, 2 * sigma * (p + 1));
+      const auto [est, k] = normAm(A, 2 * sigma * (p + 1));
       eta[p - 1] = std::pow(est, 1.0 / (2 * p + 2));
       mv += k;
     }
@@ -573,12 +580,62 @@ selectTaylorDegree(const Eigen::SparseMatrix<Float> &A,
       alpha[p - 1] = std::max(eta[p - 1], eta[p]);
     }
   }
+#if DEBUG
+  std::cout << "alpha=" << alpha << "\n";
+#endif
   for (uint32_t p = 2; p <= p_max; p++) {
     for (uint32_t m = p * (p - 1) - 1; m < m_max; m++) {
       M(m, p - 2) = alpha[p - 2] / Float(THETA[m]);
     }
   }
+#if DEBUG
+  std::cout << "M=" << M << "\n";
+#endif
   return {M, mv, alpha, !bound_hold};
+}
+
+template <typename Float>
+std::tuple<Eigen::VectorX<Float>, Eigen::VectorX<Float>>
+chebyshev_iteration(const Eigen::SparseMatrix<Float> &L,
+                   const Eigen::VectorX<Float> &u,
+                   const Eigen::VectorX<Float> &v,
+                   const Float t,
+                   const uint32_t max_iter = 25) {
+    using Vector = Eigen::VectorX<Float>;
+    const uint32_t n = L.rows();
+    const Float tol = Float(1e-3);
+
+    Vector sqrtL_u = u;
+    Float c1 = sqrtL_u.template lpNorm<Eigen::Infinity>();
+    Vector T0 = u;
+    Vector T1 = sqrtL_u;
+
+    for (uint32_t k = 1; k <= max_iter; ++k) {
+        sqrtL_u = L * sqrtL_u;
+        Vector T2 = Float(2) * t * sqrtL_u - T0;
+
+        Float c2 = T2.template lpNorm<Eigen::Infinity>();
+        if (c1 + c2 <= tol * T2.template lpNorm<Eigen::Infinity>()) break;
+
+        T0 = T1;
+        T1 = T2;
+        c1 = c2;
+    }
+    Vector sinc2 = v;
+    c1 = sinc2.template lpNorm<Eigen::Infinity>();
+    Vector term = v;
+    const Float t2 = t * t / 4;
+
+    for (uint32_t k = 1; k <= max_iter; ++k) {
+        term = L * term;
+        term = term * (-t2 / (Float(2*k) * Float(2*k+1)));
+        sinc2 += term;
+
+        Float c2 = term.template lpNorm<Eigen::Infinity>();
+        if (c1 + c2 <= tol * sinc2.template lpNorm<Eigen::Infinity>()) break;
+        c1 = c2;
+    }
+    return {T1, sinc2};
 }
 
 template <typename Float>
@@ -598,17 +655,21 @@ compute_gautschi_coefficients(const Eigen::SparseMatrix<Float> &Omega,
   uint32_t m_max = 25;
   uint32_t p_max = 5;
 
+  Eigen::SparseMatrix<Float> scaledOmega = Omega;
+
   // params: cos(t*Omega)
-  auto [M, mv, alpha, unA] = selectTaylorDegree(Omega, u, true, m_max, p_max);
-  //#if DEBUG
-  //    std::cout << "First M is: " << M << "\n";
-  //#endif
+  auto [M, mv, alpha, unA] =
+      selectTaylorDegree(scaledOmega, u, true, m_max, p_max);
+#if DEBUG
+  std::cout << "mv=" << mv << " unA=" << unA << "\n";
+#endif
   uint32_t m = M.rows();
   Float theta = THETA[m];
   uint32_t s;
 #if DEBUG
   std::cout << "m=" << m << " theta=" << theta << "\n";
   std::cout << "Ceil fun=" << std::ceil(alpha[0] / Float(theta)) << "\n";
+  std::cout << "alpha=" << alpha << "\n";
 #endif
   if (std::ceil(alpha[0] / Float(theta)) < 1)
     s = 1;
@@ -617,38 +678,66 @@ compute_gautschi_coefficients(const Eigen::SparseMatrix<Float> &Omega,
 
   // cos(t*Omega)u
   Vector T0 = Vector::Zero(n);
+  if (s % 2 == 0)
+    T0 = u / 2;
   Vector T1 = u;
   Vector cos_term;
 
+  Vector U = T0;
+
 #if DEBUG
-  std::cout << "Right before first Taylor loop\n";
+  std::cout << "Right before first Cheb loop\n";
   std::cout << "s=" << s << " m=" << m << "\n";
 #endif
 
-  for (uint32_t i = 1; i <= s; i++) {
+  for (uint32_t i = 1; i <= s + 1; i++) {
+    if (i == s + 1) {
+      U = 2 * U;
+      T1 = U;
+    }
     Vector V = T1;
     Vector B = T1;
     Float c1 = B.template lpNorm<Eigen::Infinity>();
-#if DEBUG
-    std::cout << c1 << " ";
-#endif
+    //#if DEBUG
+    //    std::cout << "c1=" << c1 << "\n";
+    //#endif
 
     for (uint32_t k = 1; k <= m; k++) {
-      Float beta = 2 * k;
-      Float gamma = beta - 1;
+      Float beta, gamma, q;
+      beta = Float(2. * k);
+      if (i <= s) {
+        gamma = beta - 1.;
+        q = Float(1. / (beta + 1.));
+      } else {
+        gamma = beta + 1.;
+        q = gamma;
+      }
 
       B = Omega * B;
-      // B = (Omega * B) * (std::pow(t / s, 2) / (beta * gamma));
-      B = (Omega * B) * (std::pow(t / s, 1) / (beta * gamma));
-      V += ((k + 1) % 2 == 0 ? 1 : -1) * B;
+      B = (Omega * B) * (std::pow(t / s, 2) / (beta * gamma));
+      V += ((k % 2 == 0) ? 1 : -1) * B;
 
       Float c2 = B.template lpNorm<Eigen::Infinity>();
-      if (c1 + c2 <= tol * V.template lpNorm<Eigen::Infinity>()) {
+      if (c1 + c2 <=
+          tol * std::max(Float(1), V.template lpNorm<Eigen::Infinity>())) {
         break;
       }
       c1 = c2;
     }
-    Vector T2 = (i == 1) ? V : 2 * V - T0;
+    //#if DEBUG
+    //    std::cout << "thrown outside loop\n";
+    //#endif
+    Vector T2;
+    if (i == 1) {
+      T2 = V;
+    } else {
+      T2 = 2 * V - T0;
+    }
+    if (i <= s - 1) {
+      if ((s % 2 == 0 && i % 2 == 1) || (s % 2 == 1 && i % 2 == 0)) {
+        U = U + T2;
+      }
+    }
     T0 = T1;
     T1 = T2;
     if (i == s)
@@ -657,7 +746,7 @@ compute_gautschi_coefficients(const Eigen::SparseMatrix<Float> &Omega,
 
   // sinc²(t*Omega/2)v
   auto [M2, mv2, alpha2, unA2] =
-      selectTaylorDegree(Omega, v, false, m_max, p_max);
+      selectTaylorDegree(scaledOmega, v, false, m_max, p_max);
   m = M2.rows();
   theta = THETA[m];
 
@@ -758,13 +847,11 @@ void gautschi_step_almohy(
     const uint32_t ny, const Float dx, const Float dy, const Float tau, F fun) {
   ubuf = Omega_scaled(Laplacian, un, tau);
   ubuf = ubuf.array().unaryExpr(fun);
-#if DEBUG
-  std::cout << "at least getting inside the stepping function\n";
-#endif
 
-  const auto [cos, sinc] = compute_gautschi_coefficients<Float>(
-      Laplacian, un, ubuf, tau, Float(1e-14));
-  unext = 2 * cos - upast + tau * tau * sinc;
+  const auto [cos, sinc2] = chebyshev_iteration(Laplacian, un, ubuf, tau); 
+  //const auto [cos, sinc2] = compute_gautschi_coefficients<Float>(
+  //    Laplacian, un, ubuf, tau, Float(1e-14));
+  unext = 2 * cos - upast + tau * tau * sinc2;
   vnext = (unext - upast) / 2 / tau;
 }
 
@@ -928,7 +1015,7 @@ void analyze_lapl() {
 
 template <typename Float> void compare_operators(const uint32_t n = 1000) {
   uint32_t nx, ny;
-  nx = ny = 100;
+  nx = ny = 50;
   double L = 3.;
   const auto dx = 2 * L / nx;
   const auto dy = 2 * L / ny;
@@ -940,33 +1027,37 @@ template <typename Float> void compare_operators(const uint32_t n = 1000) {
   auto u = apply_function_uniform(-L, L, nx, -L, L, ny, soliton);
 
   u.normalize();
+
+#if !DEBUG
   std::vector<Float> test_times = {1.e-4, 1.e-3, 1.e-2, 1.e-1};
+#endif
+
+#if DEBUG
+  std::vector<Float> test_times = {1.e-1};
+#endif
   for (auto t : test_times) {
     auto krylov_sinc = sinc2_L_half(NLaplacian, u, t);
     auto krylov_cos = cos_L(NLaplacian, u, t);
-    auto [cheb_cos, cheb_sinc] =
-        compute_gautschi_coefficients(NLaplacian, u, u, t, Float(1e-13));
+    auto [am_cos, am_sinc] =
+        compute_gautschi_coefficients(Laplacian, u, u, t, Float(1e-6));
 
     std::cout << "t=" << t << ":\n";
     std::cout << "cos(t sqrt(L)) u\n";
     std::cout << "\tKrylov: " << krylov_cos.norm() << "\n";
-    std::cout << "\tChebyshev: " << cheb_cos.norm() << "\n";
-    std::cout << "\tDiff: "
-              << (krylov_cos - cheb_cos).norm() / krylov_cos.norm() << "\n\n";
+    std::cout << "\tAl-Mohy: " << am_cos.norm() << "\n";
+    std::cout << "\tDiff: " << (krylov_cos - am_cos).norm() << "\n\n";
 
     std::cout << "sinc²(t/2 sqrt(L)) u\n";
     std::cout << "\tKrylov: " << krylov_sinc.norm() << "\n";
-    std::cout << "\tChebyshev: " << cheb_sinc.norm() << "\n";
-    std::cout << "\tDiff: "
-              << (krylov_sinc - cheb_sinc).norm() / krylov_sinc.norm()
-              << "\n\n";
+    std::cout << "\tAl-Mohy: " << am_sinc.norm() << "\n";
+    std::cout << "\tDiff: " << (krylov_sinc - am_sinc).norm() << "\n\n";
   }
 }
 
 int main() {
   compare_operators<double>();
   // analyze_lapl();
-  // soliton_evolution<double>(4., 32, 32);
+  //soliton_evolution<double>(4., 32, 32);
   // benchmark();
   /*
   // TODO capture n = nx = ny, L via argv
