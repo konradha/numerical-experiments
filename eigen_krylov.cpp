@@ -5,6 +5,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <iomanip>
@@ -16,21 +17,52 @@
 
 #define DEBUG 0
 
-#define PROGRESS_BAR(i, total) \
-    if ((i + 1) % (total/100 + 1) == 0 || i + 1 == total) { \
-        float progress = (float)(i + 1)/total; \
-        int barWidth = 70; \
-        std::cout << "["; \
-        int pos = barWidth * progress; \
-        for (int i = 0; i < barWidth; ++i) { \
-            if (i < pos) std::cout << "="; \
-            else if (i == pos) std::cout << ">"; \
-            else std::cout << " "; \
-        } \
-        std::cout << "] " << int(progress * 100.0) << "% \r"; \
-        std::cout.flush(); \
-        if (i + 1 == total) std::cout << std::endl; \
-    }
+#define PROGRESS_BAR(i, total)                                                 \
+  if ((i + 1) % (total / 100 + 1) == 0 || i + 1 == total) {                    \
+    float progress = (float)(i + 1) / total;                                   \
+    int barWidth = 70;                                                         \
+    std::cout << "[";                                                          \
+    int pos = barWidth * progress;                                             \
+    for (int i = 0; i < barWidth; ++i) {                                       \
+      if (i < pos)                                                             \
+        std::cout << "=";                                                      \
+      else if (i == pos)                                                       \
+        std::cout << ">";                                                      \
+      else                                                                     \
+        std::cout << " ";                                                      \
+    }                                                                          \
+    std::cout << "] " << int(progress * 100.0) << "% \r";                      \
+    std::cout.flush();                                                         \
+    if (i + 1 == total)                                                        \
+      std::cout << std::endl;                                                  \
+  }
+
+static const double THETA[] = {0.,
+                               2.220446049250313e-16,
+                               3.847473727e-01,
+                               6.375714478e-01,
+                               8.852561855e-01,
+                               1.127477894e+00,
+                               1.363950631e+00,
+                               1.595528769e+00,
+                               1.823161970e+00,
+                               2.047480191e+00,
+                               2.269059034e+00,
+                               2.488280198e+00,
+                               2.705461362e+00,
+                               2.920861859e+00,
+                               3.134706772e+00,
+                               3.347189767e+00,
+                               3.558484278e+00,
+                               3.768740244e+00,
+                               3.978096116e+00,
+                               4.186672495e+00,
+                               4.394576084e+00,
+                               4.601905143e+00,
+                               4.808746085e+00,
+                               5.015177108e+00,
+                               5.221266277e+00,
+                               5.427074274e+00};
 
 template <typename F, typename Scalar>
 concept ValidScalarLambda =
@@ -311,10 +343,30 @@ void stormer_verlet_step_spmv(
     const Eigen::VectorX<Float> &upast, Eigen::VectorX<Float> &ubuf,
     const Eigen::SparseMatrix<Float> &Laplacian, const uint32_t nx,
     const uint32_t ny, const Float dx, const Float dy, const Float tau, F fun) {
-  const Eigen::SparseMatrix<Float> NLaplacian = -Laplacian; 
+  const Eigen::SparseMatrix<Float> NLaplacian = -Laplacian;
   gradH_q_spmv(un, ubuf, NLaplacian, nx, ny, dx, dy, fun);
   unext = 2 * un - upast + .5 * tau * tau * ubuf;
   vnext = (unext - upast) * .5 / tau;
+}
+
+template <typename Float, typename F>
+void stormer_verlet_step_spmv_transformed(
+    Eigen::VectorX<Float> &unext, Eigen::VectorX<Float> &vnext,
+    const Eigen::VectorX<Float> &un, const Eigen::VectorX<Float> &vn,
+    const Eigen::VectorX<Float> &upast, Eigen::VectorX<Float> &ubuf,
+    const Eigen::SparseMatrix<Float> &Laplacian, const uint32_t nx,
+    const uint32_t ny, const Float dx, const Float dy, const Float tau, F fun) {
+
+  Float gnorm = Float(1);
+  gnorm += (-un.dot(Laplacian * un));
+  gnorm += vn.squaredNorm();
+  Float g = Float(1) / std::sqrt(gnorm);
+  Eigen::VectorX<Float> vtrans = g * vn;
+  const Eigen::SparseMatrix<Float> NLaplacian = -Laplacian;
+  gradH_q_spmv(un, ubuf, NLaplacian, nx, ny, dx, dy, fun);
+  unext = 2 * un - upast + .5 * tau * tau * ubuf;
+  vnext = (unext - upast) * .5 / tau;
+  vnext /= g;
 }
 
 template <typename Float>
@@ -326,25 +378,24 @@ lanczos_L(const Eigen::SparseMatrix<Float> &L, const Eigen::VectorX<Float> &u,
   Eigen::MatrixX<Float> T = Eigen::MatrixX<Float>::Zero(m, m);
 
   Float beta = u.norm();
-  V.col(0) = u / beta; 
+  V.col(0) = u / beta;
 
   for (uint32_t j = 0; j < m - 1; j++) {
     Eigen::VectorX<Float> w = L * V.col(j);
     if (j > 0)
       w -= T(j - 1, j) * V.col(j - 1);
-     
+
     T(j, j) = w.dot(V.col(j));
     w -= T(j, j) * V.col(j);
 
     for (uint32_t i = 0; i <= j; i++) {
-        Float coeff = w.dot(V.col(i));
-        w -= coeff * V.col(i);
+      Float coeff = w.dot(V.col(i));
+      // CGS
+      // w -= coeff * V.col(i);
+      // MGS
+      w.noalias() -= coeff * V.col(i);
     }
     T(j + 1, j) = w.norm();
-#if DEBUG
-    std::cout << "j=" << j << " alpha=" << T(j,j)
-              << " beta=" << T(j+1,j) << "\n";
-#endif
     // use symmetry
     T(j, j + 1) = T(j + 1, j);
     if (T(j + 1, j) < 1e-8) {
@@ -360,12 +411,13 @@ lanczos_L(const Eigen::SparseMatrix<Float> &L, const Eigen::VectorX<Float> &u,
 template <typename Float>
 Eigen::VectorX<Float> cos_L(const Eigen::SparseMatrix<Float> &L,
                             const Eigen::VectorX<Float> &u, Float t,
-                            const uint32_t m = 30) {
+                            const uint32_t m = 10) {
   const auto [V, T, beta] = lanczos_L(L, u, m);
 
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixX<Float>> es(T);
   Eigen::MatrixX<Float> cos_sqrt_T =
-      (es.eigenvectors() * (t * es.eigenvalues().array().abs().sqrt()).cos().matrix().asDiagonal() *
+      (es.eigenvectors() *
+       (t * es.eigenvalues().array().abs().sqrt()).cos().matrix().asDiagonal() *
        es.eigenvectors().transpose());
   Eigen::VectorX<Float> e1 = Eigen::VectorX<Float>::Zero(T.rows());
   e1(0) = 1.0;
@@ -375,15 +427,18 @@ Eigen::VectorX<Float> cos_L(const Eigen::SparseMatrix<Float> &L,
 template <typename Float>
 Eigen::VectorX<Float> sinc_L(const Eigen::SparseMatrix<Float> &L,
                              const Eigen::VectorX<Float> &u, Float t,
-                             const uint32_t m = 30) {
+                             const uint32_t m = 10) {
   const auto [V, T, beta] = lanczos_L(L, u, m);
 
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixX<Float>> es(T);
-  
+
   Eigen::MatrixX<Float> sinc_sqrt_T =
-       (es.eigenvectors() * (t * es.eigenvalues().array().abs().sqrt()).sinc().matrix().asDiagonal() *
+      (es.eigenvectors() *
+       (t * es.eigenvalues().array().abs().sqrt())
+           .sinc()
+           .matrix()
+           .asDiagonal() *
        es.eigenvectors().transpose());
- 
 
   Eigen::VectorX<Float> e1 = Eigen::VectorX<Float>::Zero(T.rows());
   e1(0) = 1.0;
@@ -393,14 +448,18 @@ Eigen::VectorX<Float> sinc_L(const Eigen::SparseMatrix<Float> &L,
 template <typename Float>
 Eigen::VectorX<Float> sinc2_L_half(const Eigen::SparseMatrix<Float> &L,
                                    const Eigen::VectorX<Float> &u, Float t,
-                                   const uint32_t m = 30) {
+                                   const uint32_t m = 10) {
   const auto [V, T, beta] = lanczos_L(L, u, m);
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixX<Float>> es(T);
   Eigen::MatrixX<Float> sinc_sqrt_T =
-      (es.eigenvectors() * (t/2. * es.eigenvalues().array().abs().sqrt()).
-       unaryExpr([](Float x) {
-           return std::abs(x) < 1e-8 ? Float(1) : std::sin(x)/x;
-       }).square().matrix().asDiagonal() *
+      (es.eigenvectors() *
+       (t / 2. * es.eigenvalues().array().abs().sqrt())
+           .unaryExpr([](Float x) {
+             return std::abs(x) < 1e-8 ? Float(1) : std::sin(x) / x;
+           })
+           .square()
+           .matrix()
+           .asDiagonal() *
        es.eigenvectors().transpose());
   Eigen::VectorX<Float> e1 = Eigen::VectorX<Float>::Zero(T.rows());
   e1(0) = 1.0;
@@ -410,21 +469,15 @@ Eigen::VectorX<Float> sinc2_L_half(const Eigen::SparseMatrix<Float> &L,
 template <typename Float>
 Eigen::VectorX<Float> Omega_scaled(const Eigen::SparseMatrix<Float> &L,
                                    const Eigen::VectorX<Float> &u, Float t,
-                                   const uint32_t m = 30) {
+                                   const uint32_t m = 10) {
   const auto [V, T, beta] = lanczos_L(L, u, m);
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixX<Float>> es(T);
-#if DEBUG
-  std::cout << "Omega_scaled\n";
-  std::cout << "Eigenvalues: " << es.eigenvalues().transpose() << "\n";
-  std::cout << "Beta: " << beta << "\n";
-  std::cout << "V dims: " << V.rows() << "x" << V.cols() << "\n";
-  std::cout << "T dims: " << T.rows() << "x" << T.cols() << "\n";
-#endif
-  Eigen::MatrixX<Float> id_T = (es.eigenvectors() * (t * es.eigenvalues().array().abs().sqrt()).
-       unaryExpr([](Float x) {
-           return x;
-       }).matrix().asDiagonal() *
-       es.eigenvectors().transpose());
+  Eigen::MatrixX<Float> id_T = (es.eigenvectors() *
+                                (t * es.eigenvalues().array().abs().sqrt())
+                                    .unaryExpr([](Float x) { return x; })
+                                    .matrix()
+                                    .asDiagonal() *
+                                es.eigenvectors().transpose());
 
   Eigen::VectorX<Float> e1 = Eigen::VectorX<Float>::Zero(T.rows());
   e1(0) = 1.0;
@@ -441,25 +494,279 @@ void gautschi_step_krylov(
 
   ubuf = Omega_scaled(Laplacian, un, tau);
 #if DEBUG
-  std::cout << ubuf << "\n";;
+  std::cout << ubuf << "\n";
+  ;
 #endif
 
   ubuf = ubuf.array().unaryExpr(fun);
   unext = 2 * cos_L(Laplacian, un, tau) - upast +
-          tau * tau * sinc2_L_half(Laplacian, ubuf, tau/2);
+          tau * tau * sinc2_L_half(Laplacian, ubuf, tau / 2);
   vnext = (unext - upast) / 2 / tau;
 }
 
+template <typename Float>
+std::tuple<Float, uint32_t> normAm(const Eigen::SparseMatrix<Float> &A,
+                                   const uint32_t m) {
+  const uint32_t n = A.rows();
+  const Eigen::SparseMatrix<Float> AT = A.transpose();
+  const uint32_t t = 1;
+  Eigen::VectorX<Float> x = Eigen::VectorX<Float>::Random(n);
+  x.normalize();
+  Eigen::VectorX<Float> v = x;
+  Eigen::VectorX<Float> w = x;
+  Float estimate = Float(0);
+  for (uint32_t j = 0; j < m; j++) {
+    v = A * v;
+    w = AT * w;
+  }
+  estimate = std::max(v.template lpNorm<1>(), w.template lpNorm<1>());
+  return {estimate, 2 * m * t};
+}
+
+template <typename Float> struct TaylorParams {
+  Eigen::MatrixX<Float> M;
+  uint32_t mv;
+  Eigen::VectorX<Float> alpha;
+  bool unA;
+};
+
+template <typename Float>
+TaylorParams<Float>
+selectTaylorDegree(const Eigen::SparseMatrix<Float> &A,
+                   const Eigen::VectorX<Float> &b, const bool flag,
+                   const uint32_t m_max = 25, const uint32_t p_max = 5) {
+  using Matrix = Eigen::MatrixX<Float>;
+  using Vector = Eigen::VectorX<Float>;
+  if (p_max < 2 || m_max > 25 || m_max < p_max * (p_max - 1)) {
+    throw std::runtime_error("Invalid p_max or m_max");
+  }
+#if DEBUG
+  if (A.rows() != A.cols() || A.rows() != b.rows()) {
+    throw std::runtime_error(
+        "Matrix A dimensions must match vector b dimensions");
+  }
+#endif
+  const Float sigma = flag ? 1.0 : 0.5;
+  uint32_t mv = 0;
+  const Float mu = A.diagonal().mean();
+  auto A_shifted = A;
+  A_shifted.diagonal().array() -= mu;
+  Float normA = A_shifted.coeffs().abs().sum();
+  Float bound = 2 * 2 * p_max * (p_max + 3) / (m_max * b.cols()) - 1;
+  Float c = std::pow(normA, sigma);
+  bool bound_hold = false;
+  Matrix M = Matrix::Zero(m_max, p_max - 1);
+  Vector alpha(p_max - 1);
+  if (c <= THETA[m_max - 1] * bound) {
+    alpha = Vector::Constant(p_max - 1, c);
+    bound_hold = true;
+  }
+  if (!bound_hold) {
+    Vector eta = Vector::Zero(p_max);
+    for (uint32_t p = 1; p <= p_max; p++) {
+      const auto [est, k] = normAm(A_shifted, 2 * sigma * (p + 1));
+      eta[p - 1] = std::pow(est, 1.0 / (2 * p + 2));
+      mv += k;
+    }
+
+    for (uint32_t p = 1; p < p_max; p++) {
+      alpha[p - 1] = std::max(eta[p - 1], eta[p]);
+    }
+  }
+  for (uint32_t p = 2; p <= p_max; p++) {
+    for (uint32_t m = p * (p - 1) - 1; m < m_max; m++) {
+      M(m, p - 2) = alpha[p - 2] / Float(THETA[m]);
+    }
+  }
+  return {M, mv, alpha, !bound_hold};
+}
+
+template <typename Float>
+std::tuple<Eigen::VectorX<Float>, Eigen::VectorX<Float>>
+compute_gautschi_coefficients(const Eigen::SparseMatrix<Float> &Omega,
+                              const Eigen::VectorX<Float> &u,
+                              const Eigen::VectorX<Float> &v, Float t,
+                              Float tol) {
+#if DEBUG
+  if (u.rows() != v.rows() || u.rows() != Omega.rows() ||
+      Omega.rows() != Omega.cols()) {
+    throw std::runtime_error("Input dimensions mismatch");
+  }
+#endif
+  using Vector = Eigen::VectorX<Float>;
+  uint32_t n = Omega.rows();
+  uint32_t m_max = 25;
+  uint32_t p_max = 5;
+
+  // params: cos(t*Omega)
+  auto [M, mv, alpha, unA] = selectTaylorDegree(Omega, u, true, m_max, p_max);
+  //#if DEBUG
+  //    std::cout << "First M is: " << M << "\n";
+  //#endif
+  uint32_t m = M.rows();
+  Float theta = THETA[m];
+  uint32_t s;
+#if DEBUG
+  std::cout << "m=" << m << " theta=" << theta << "\n";
+  std::cout << "Ceil fun=" << std::ceil(alpha[0] / Float(theta)) << "\n";
+#endif
+  if (std::ceil(alpha[0] / Float(theta)) < 1)
+    s = 1;
+  else
+    s = std::ceil(alpha[0] / Float(theta));
+
+  // cos(t*Omega)u
+  Vector T0 = Vector::Zero(n);
+  Vector T1 = u;
+  Vector cos_term;
+
+#if DEBUG
+  std::cout << "Right before first Taylor loop\n";
+  std::cout << "s=" << s << " m=" << m << "\n";
+#endif
+
+  for (uint32_t i = 1; i <= s; i++) {
+    Vector V = T1;
+    Vector B = T1;
+    Float c1 = B.template lpNorm<Eigen::Infinity>();
+#if DEBUG
+    std::cout << c1 << " ";
+#endif
+
+    for (uint32_t k = 1; k <= m; k++) {
+      Float beta = 2 * k;
+      Float gamma = beta - 1;
+
+      B = Omega * B;
+      // B = (Omega * B) * (std::pow(t / s, 2) / (beta * gamma));
+      B = (Omega * B) * (std::pow(t / s, 1) / (beta * gamma));
+      V += ((k + 1) % 2 == 0 ? 1 : -1) * B;
+
+      Float c2 = B.template lpNorm<Eigen::Infinity>();
+      if (c1 + c2 <= tol * V.template lpNorm<Eigen::Infinity>()) {
+        break;
+      }
+      c1 = c2;
+    }
+    Vector T2 = (i == 1) ? V : 2 * V - T0;
+    T0 = T1;
+    T1 = T2;
+    if (i == s)
+      cos_term = T2;
+  }
+
+  // sinc²(t*Omega/2)v
+  auto [M2, mv2, alpha2, unA2] =
+      selectTaylorDegree(Omega, v, false, m_max, p_max);
+  m = M2.rows();
+  theta = THETA[m];
+
+  if (std::ceil(alpha2[0] / Float(theta)) < 1)
+    s = 1;
+  else
+    s = std::ceil(alpha2[0] / Float(theta));
+
+  T0.setZero();
+  T1 = v;
+  Vector sinc2_term;
+
+  for (uint32_t i = 1; i <= s; i++) {
+    Vector V = T1;
+    Vector B = T1;
+    Float c1 = B.template lpNorm<Eigen::Infinity>();
+
+    for (uint32_t k = 1; k <= m; k++) {
+      Float beta = 2 * k;
+      Float gamma = beta - 1;
+
+      // Float beta = k;
+      // Float gamma = beta;
+
+      B = Omega * B;
+      B = (Omega * B) * (std::pow(t * t / s / 2 / 2, 2) / (beta * gamma));
+      V += B; // No alternating signs for sinc²
+
+      Float c2 = B.template lpNorm<Eigen::Infinity>();
+      if (c1 + c2 <= tol * V.template lpNorm<Eigen::Infinity>()) {
+        break;
+      }
+      c1 = c2;
+    }
+    Vector T2 = (i == 1) ? V : 2 * V - T0;
+    T0 = T1;
+    T1 = T2;
+
+    if (i == s)
+      sinc2_term = T2;
+  }
+
+  return {cos_term, sinc2_term};
+
+  /*
+  // sinc²(t*Omega/2)v
+  // use (for now): sinc²(x/2) = 2(1-cos(x))/x²
+  auto [M2, mv2, alpha2, unA2] = selectTaylorDegree(Omega, v, false, m_max,
+p_max); m = M2.rows(); theta = THETA[m];
+
+  if (std::ceil(alpha2[0]/Float(THETA[m])) < 1)
+      s = 1;
+  else
+      s = std::ceil(alpha2[0]/Float(THETA[m]));
+
+  T0.setZero();
+  T1 = v;
+  Vector sinc2_term;
+
+  for (uint32_t i = 1; i <= s; i++) {
+      Vector V = T1;
+      Vector B = T1;
+      Float c1 = B.template lpNorm<Eigen::Infinity>();
+
+      for (uint32_t k = 1; k <= m; k++) {
+          Float beta = 2*k;
+          Float gamma = beta + 1;
+          B = Omega * B;
+          B = (Omega * B) * (std::pow(t/s, 2)/(beta*gamma));
+          //B = (Omega * B) * (std::pow(t/(2*s), 2)/(beta*gamma));
+          //B = (Omega * B) * (std::pow(t/(2*s), 1)/(beta*gamma));
+          V += (k % 2 == 0 ? 1 : -1) * B;
+          Float c2 = B.template lpNorm<Eigen::Infinity>();
+          if (c1 + c2 <= tol * V.template lpNorm<Eigen::Infinity>()) {
+              break;
+          }
+          c1 = c2;
+      }
+      Vector T2 = (i == 1) ? V : 2*V - T0;
+#if DEBUG
+      std::cout << "i=" << i << " s=" << s << " T2: " << T2.rows() << "x" <<
+T2.cols() << "\n"; #endif T0 = T1; T1 = T2;
+
+      if (i == s) sinc2_term = T2;
+  }
+
+  // factor 1/2 due to identity above
+  return {cos_term, .5 * sinc2_term};
+  */
+}
+
 template <typename Float, typename F>
-void gautschi_step_almohy(Eigen::VectorX<Float> &unext,
-                          Eigen::VectorX<Float> &vnext,
-                          const Eigen::VectorX<Float> &un,
-                          const Eigen::VectorX<Float> &vn,
-                          const Eigen::VectorX<Float> &upast,
-                          Eigen::VectorX<Float> &ubuf,
-                          const Eigen::SparseMatrix<Float> &Laplacian,
-                          const uint32_t nx, const uint32_t ny, const Float dx,
-                          const Float dy, const Float tau, F fun) {}
+void gautschi_step_almohy(
+    Eigen::VectorX<Float> &unext, Eigen::VectorX<Float> &vnext,
+    const Eigen::VectorX<Float> &un, const Eigen::VectorX<Float> &vn,
+    const Eigen::VectorX<Float> &upast, Eigen::VectorX<Float> &ubuf,
+    const Eigen::SparseMatrix<Float> &Laplacian, const uint32_t nx,
+    const uint32_t ny, const Float dx, const Float dy, const Float tau, F fun) {
+  ubuf = Omega_scaled(Laplacian, un, tau);
+  ubuf = ubuf.array().unaryExpr(fun);
+#if DEBUG
+  std::cout << "at least getting inside the stepping function\n";
+#endif
+
+  const auto [cos, sinc] = compute_gautschi_coefficients<Float>(
+      Laplacian, un, ubuf, tau, Float(1e-14));
+  unext = 2 * cos - upast + tau * tau * sinc;
+  vnext = (unext - upast) / 2 / tau;
+}
 
 // We have some assumptions in this function:
 // write u_tt = u_xx + u_yy + f(u) (f(u) != f(u, x, y, t))
@@ -482,7 +789,7 @@ requires StepFunction<StepFn, Float, NF>
   Eigen::VectorX<Float> u_save(num_snapshots * nx * ny);
   Eigen::VectorX<Float> v_save(num_snapshots * nx * ny);
 
-  const auto Laplacian = buildD2<Float>(nx - 2, ny - 2, dx, dy); 
+  const auto Laplacian = buildD2<Float>(nx - 2, ny - 2, dx, dy);
   const Eigen::SparseMatrix<Float> NLaplacian = -Laplacian;
 
   Eigen::VectorX<Float> buf(nx * ny);
@@ -530,59 +837,74 @@ requires StepFunction<StepFn, Float, NF>
 
 template <typename Float>
 std::pair<Eigen::VectorX<Float>, Eigen::MatrixX<Float>>
-analyze_spectrum(const Eigen::SparseMatrix<Float>& L) {
-    Eigen::SelfAdjointEigenSolver<Eigen::SparseMatrix<Float>> es(L);
-    if (es.info() != Eigen::Success)
-        throw std::runtime_error("Eigenvalue computation failed");  
-    return {es.eigenvalues(), es.eigenvectors()};
+analyze_spectrum(const Eigen::SparseMatrix<Float> &L) {
+  Eigen::SelfAdjointEigenSolver<Eigen::SparseMatrix<Float>> es(L);
+  if (es.info() != Eigen::Success)
+    throw std::runtime_error("Eigenvalue computation failed");
+  return {es.eigenvalues(), es.eigenvectors()};
 }
 
 template <typename Float>
 void soliton_evolution(const Float L, const uint32_t nx, const uint32_t ny) {
-  const uint32_t nt = 10000;
+  const uint32_t nt = 1000;
   const uint32_t snapshots = 100;
   const Float t0 = 0.;
-  const Float T = 1000.;
+  const Float T = 10.;
 
   const auto dx = 2 * L / nx;
   const auto dy = 2 * L / ny;
 
   auto soliton = [](Float x, Float y) {
-    return 2. * std::atan(std::exp(3. - 5.1 * std::sqrt(x * x + y * y)));
+    return 2. * std::atan(std::exp(3. - 5. * std::sqrt(x * x + y * y)));
   };
 
   std::mt19937 gen(std::random_device{}());
-  Float mean = .1;
-  Float stddev = 2.;
+  Float mean = 0.;
+  Float stddev = .1;
 
   std::normal_distribution<float> dist(mean, stddev);
-  auto rand_field = [&](Float x, Float y) {
-    return dist(gen);
+  auto rand_field = [&](Float x, Float y) { return dist(gen); };
+
+  auto noisy_soliton = [&](Float x, Float y) {
+    return rand_field(x, y) + soliton(x, y);
   };
 
   auto zero_everywhere = [](Float x, Float y) { return 0.; };
 
   auto semilinear_term = [](Float ui) { return -std::sin(ui); };
 
-  const auto initial_u = apply_function_uniform(-L, L, nx, -L, L, ny, rand_field);
+  const auto initial_u = apply_function_uniform(-L, L, nx, -L, L, ny, soliton);
   const auto initial_v =
       apply_function_uniform(-L, L, nx, -L, L, ny, zero_everywhere);
 
   using NonlinearFuncType = decltype(semilinear_term);
-  //auto step = stormer_verlet_step_spmv<Float, NonlinearFuncType>;
-  auto step = gautschi_step_krylov<Float, NonlinearFuncType>;
+  // auto step = stormer_verlet_step_spmv_transformed<Float, NonlinearFuncType>;
+  // auto step = stormer_verlet_step_spmv<Float, NonlinearFuncType>;
+  // auto step = gautschi_step_krylov<Float, NonlinearFuncType>;
+  auto step = gautschi_step_almohy<Float, NonlinearFuncType>;
 
   const auto [u_history, v_history] =
       evolve(step, semilinear_term, initial_u, initial_v, nx, ny, dx, dy, -L, L,
              -L, L, t0, T, nt, snapshots);
 
   const std::vector<uint32_t> shape = {snapshots, nx, ny};
-  const auto fname_u = "/home/konrad/code/msc-thesis/from-scratch/evolution_u_gautschi_krylov.npy"; 
-  //const auto fname_u = "/home/konrad/code/msc-thesis/from-scratch/evolution_u_sv_spmv.npy";
+  // const auto fname_u =
+  // "/home/konrad/code/msc-thesis/from-scratch/evolution_u_gautschi_krylov.npy";
+  // const auto fname_u =
+  // "/home/konrad/code/msc-thesis/from-scratch/evolution_u_sv_spmv.npy"; const
+  // auto fname_u =
+  // "/home/konrad/code/msc-thesis/from-scratch/evolution_u_sv_spmv_adaptive.npy";
+  const auto fname_u = "/home/konrad/code/msc-thesis/from-scratch/"
+                       "evolution_u_gautschi_almohy.npy";
 
-  
-  const auto fname_v = "/home/konrad/code/msc-thesis/from-scratch/evolution_v_gautschi_krylov.npy";
-  //const auto fname_v = "/home/konrad/code/msc-thesis/from-scratch/evolution_v_sv_spmv.npy";
+  // const auto fname_v =
+  // "/home/konrad/code/msc-thesis/from-scratch/evolution_v_gautschi_krylov.npy";
+  // const auto fname_v =
+  // "/home/konrad/code/msc-thesis/from-scratch/evolution_v_sv_spmv.npy"; const
+  // auto fname_v =
+  // "/home/konrad/code/msc-thesis/from-scratch/evolution_v_sv_spmv_adaptive.npy";
+  const auto fname_v = "/home/konrad/code/msc-thesis/from-scratch/"
+                       "evolution_v_gautschi_almohy.npy";
 
   save_to_npy(fname_u, u_history, shape);
   save_to_npy(fname_v, u_history, shape);
@@ -596,7 +918,7 @@ void analyze_lapl() {
   const auto dy = 2 * L / ny;
   const auto Laplacian = buildD2<double>(nx - 2, ny - 2, dx, dy);
   const Eigen::SparseMatrix<double> NLaplacian = -Laplacian;
-  
+
   const auto [ev, vectors] = analyze_spectrum(Laplacian);
   const auto [nev, nvectors] = analyze_spectrum(NLaplacian);
 
@@ -604,11 +926,47 @@ void analyze_lapl() {
   std::cout << "-L: " << nev << "\n";
 }
 
+template <typename Float> void compare_operators(const uint32_t n = 1000) {
+  uint32_t nx, ny;
+  nx = ny = 100;
+  double L = 3.;
+  const auto dx = 2 * L / nx;
+  const auto dy = 2 * L / ny;
+  const auto Laplacian = buildD2<double>(nx - 2, ny - 2, dx, dy);
+  const Eigen::SparseMatrix<double> NLaplacian = -Laplacian;
+  auto soliton = [](Float x, Float y) {
+    return 2. * std::atan(std::exp(3. - 5. * std::sqrt(x * x + y * y)));
+  };
+  auto u = apply_function_uniform(-L, L, nx, -L, L, ny, soliton);
 
+  u.normalize();
+  std::vector<Float> test_times = {1.e-4, 1.e-3, 1.e-2, 1.e-1};
+  for (auto t : test_times) {
+    auto krylov_sinc = sinc2_L_half(NLaplacian, u, t);
+    auto krylov_cos = cos_L(NLaplacian, u, t);
+    auto [cheb_cos, cheb_sinc] =
+        compute_gautschi_coefficients(NLaplacian, u, u, t, Float(1e-13));
+
+    std::cout << "t=" << t << ":\n";
+    std::cout << "cos(t sqrt(L)) u\n";
+    std::cout << "\tKrylov: " << krylov_cos.norm() << "\n";
+    std::cout << "\tChebyshev: " << cheb_cos.norm() << "\n";
+    std::cout << "\tDiff: "
+              << (krylov_cos - cheb_cos).norm() / krylov_cos.norm() << "\n\n";
+
+    std::cout << "sinc²(t/2 sqrt(L)) u\n";
+    std::cout << "\tKrylov: " << krylov_sinc.norm() << "\n";
+    std::cout << "\tChebyshev: " << cheb_sinc.norm() << "\n";
+    std::cout << "\tDiff: "
+              << (krylov_sinc - cheb_sinc).norm() / krylov_sinc.norm()
+              << "\n\n";
+  }
+}
 
 int main() {
-  //analyze_lapl();
-  soliton_evolution<double>(4., 32, 32);
+  compare_operators<double>();
+  // analyze_lapl();
+  // soliton_evolution<double>(4., 32, 32);
   // benchmark();
   /*
   // TODO capture n = nx = ny, L via argv
