@@ -34,9 +34,9 @@ def build_D2(nx, ny, dx, dy, dtype):
     offdiag_pos = torch.ones(N - 1, dtype=dtype)
     inner_outer_identity = torch.ones(N - (nx + 2),  dtype=dtype)
 
-    indices_main = torch.arange(N, dtype=dtype)
-    indices_off1 = torch.arange(1, N, dtype=dtype)
-    indices_off2 = torch.arange(0, N - 1, dtype=dtype)
+    indices_main = torch.arange(N, dtype=torch.long)
+    indices_off1 = torch.arange(1, N, dtype=torch.long)
+    indices_off2 = torch.arange(0, N - 1, dtype=torch.long)
 
     row_indices = torch.cat([
         indices_main, indices_off1, indices_off2,
@@ -62,23 +62,29 @@ def build_D2(nx, ny, dx, dy, dtype):
     L *= (1 / dx) ** 2
     return L
 
+
 def animate(X, Y, data, dt, num_snapshots, nt, title):
+    mxl, mxr = x == -Lx /2, x == Lx /2 
+    myl, myr = y == -Ly /2, y == Ly /2
+    
     from matplotlib.animation import FuncAnimation
     fig = plt.figure(figsize=(20, 20))
     ax = fig.add_subplot(111, projection='3d')
     surf = ax.plot_surface(X, Y, data[0], cmap='viridis',)
     def update(frame):
         ax.clear() 
+        #ax.scatter(X, Y, mxl, color='r')    
+        #ax.scatter(X, Y, myl, color='b')
 
-        
         ax.plot_surface(X, Y,
                 #data[frame].cpu().numpy().real ** 2 + data[frame].cpu().numpy().imag ** 2,
                 data[frame].cpu().numpy().real,
                 cmap='viridis')
         ax.set_title(f"{title}, t={(frame * dt * (nt / num_snapshots)):.2f}")
 
-    fps = 300
+    fps = 3
     ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
+    #ani.save("scattering.mp4")
     plt.show()
 
 def u_xx_yy(buf, a, dx, dy):
@@ -90,7 +96,9 @@ def u_xx_yy(buf, a, dx, dy):
     return uxx_yy
 
 def gaussian_center(x, y, A, sigma, kx, ky, dx, dy):
-    un =  A * torch.exp(-(x ** 2 +  y ** 2) / 4 / sigma ** 2) * torch.exp(1j * (kx * x + ky * y))  
+    un1 =  A * torch.exp(-((x - 4) ** 2 +  (y - 2.) ** 2) / 4 / sigma ** 2) * torch.exp(1j * (x + y))  
+    un2 =  A * torch.exp(-((x + 4)** 2 +  (y + 2.) ** 2) / 4 / sigma ** 2) * torch.exp(-1j * (x + y))
+    un = un1 + un2
     norm = torch.sqrt(torch.sum(un.real ** 2 + un.imag ** 2))
     return un / norm
 
@@ -105,6 +113,60 @@ def estimate_k(u, dx, dy):
     k_avg = torch.sum(K * weights) / torch.sum(weights)
     return k_avg.real
 
+#def update_laplacian(L, nx, ny, dx, dy, dt, u_torch, u_numpy, i=1):
+#    du_dx_left      = torch.mean((u_torch[0, :] - u_torch[1, :])/dx)
+#    du_dy_bottom    = torch.mean((u_torch[:, 0] - u_torch[:, 1])/dy)
+#    
+#    du_dx_right = -torch.mean((u_torch[-1, :] - u_torch[-2, :])/dx)
+#    du_dy_top   = -torch.mean((u_torch[:, -1] - u_torch[:, -2])/dy)
+#  
+#    left_boundary   = np.arange(0, (nx+2)*ny, nx+2)
+#    right_boundary  = np.arange(nx+1, (nx+2)*ny, nx+2)
+#    bottom_boundary = np.arange(0, nx+2)
+#    top_boundary    = np.arange((ny-1)*(nx+2), ny*(nx+2))
+#
+#    L.data[left_boundary]   *= (1 -  dt*du_dx_left.cpu().numpy())
+#    L.data[right_boundary]  *= (1 +  dt*du_dx_right.cpu().numpy())
+#    L.data[bottom_boundary] *= (1 -  dt*du_dy_bottom.cpu().numpy())
+#    L.data[top_boundary]    *= (1 +  dt*du_dy_top.cpu().numpy())
+#
+#    if i == 1: 
+#        diag_corners = np.array([0, nx+1, (ny-1)*(nx+2), ny*(nx+2)-1])
+#        L.data[diag_corners] *= 0.5  
+#
+#    return L
+
+def update_laplacian_close(L, nx, ny, dx, dy, dt, u_torch, u_numpy, i=1):
+    du_dx_left      = (u_torch[0, :] - u_torch[1, :])/dx 
+    du_dy_bottom    = (u_torch[:, 0] - u_torch[:, 1])/dy
+    du_dx_right     = -(u_torch[-1, :] - u_torch[-2, :])/dx
+    du_dy_top       = -(u_torch[:, -1] - u_torch[:, -2])/dy
+
+    left_boundary   = np.arange(0, (nx+2)*ny, nx+2)
+    right_boundary  = np.arange(nx+1, (nx+2)*ny, nx+2)
+    bottom_boundary = np.arange(0, nx+2)
+    top_boundary    = np.arange((ny-1)*(nx+2), ny*(nx+2))
+
+    L.data[left_boundary]   *= (1 - dt*du_dx_left.cpu().numpy()[1:-1])
+    L.data[right_boundary]  *= (1 - dt*du_dx_right.cpu().numpy()[1:-1])
+    L.data[bottom_boundary] *= (1 - dt*du_dy_bottom.cpu().numpy())
+    L.data[top_boundary]    *= (1 - dt*du_dy_top.cpu().numpy())
+    
+    diag_corners = np.array([0, nx+1, (ny-1)*(nx+2), ny*(nx+2)-1])
+    L.data[diag_corners] *= 0.5  
+
+    return L
+
+def update_laplacian(L, nx, ny, dx, dy, dt, u_torch, u_numpy, i=1): 
+    left_boundary = np.arange(0, (nx+2)*ny, nx+2)
+    right_boundary = np.arange(nx+1, (nx+2)*ny, nx+2)
+    bottom_boundary = np.arange(0, nx+2)
+    top_boundary = np.arange((ny-1)*(nx+2), ny*(nx+2))
+    all_boundaries = np.concatenate([left_boundary, right_boundary, bottom_boundary, top_boundary])
+    L.data[all_boundaries] *= 2/3  # Changes -3 to -2
+
+    return L
+
 class NLSEStepper:
     def __init__(self, nx, ny, Lx, Ly, dt, nt, initial_u, snapshot_freq=10, dtype=torch.float64):
         self.dtype = dtype
@@ -114,8 +176,20 @@ class NLSEStepper:
         self.un = self.un_real + 1j * self.un_imag
 
         self.u0 = initial_u.clone()
+        self.dt = torch.tensor(dt)
 
-        self.L = torch_sparse_to_scipy_sparse(build_D2(nx-2, ny-2, Lx/nx, Ly/ny, self.dtype))
+        self.L = (build_D2(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128))
+        
+        self.Id = torch.sparse_coo_tensor(
+               torch.tensor([[i, i] for i in range(nx * ny)]).T,
+               torch.ones(nx *ny, dtype=torch.complex128),
+               (nx*ny, nx*ny))
+        self.Id_np = torch_sparse_to_scipy_sparse(self.Id)
+        
+        self.L_lhs = torch_sparse_to_scipy_sparse( -.5 * self.dt * self.L + 1.j * self.Id).tocsr() 
+        self.L = torch_sparse_to_scipy_sparse(self.L).tocsr()
+        
+
 
         self.sf = snapshot_freq
 
@@ -127,7 +201,7 @@ class NLSEStepper:
 
         self.dx = torch.tensor(Lx / nx)
         self.dy = torch.tensor(Ly / ny)
-        self.dt = torch.tensor(dt)
+        
 
         self.kx = 2*np.pi*torch.fft.fftfreq(nx, self.dx)
         self.ky = 2*np.pi*torch.fft.fftfreq(ny, self.dy)
@@ -145,13 +219,16 @@ class NLSEStepper:
         u_n = H_1(t/2) o H_2(t) o H_1(t/2) u_{n-1}
 
         """    
-    def step_full(self, u):
+    def step_full(self, u, i=1):
         # fully complex evolution
         rho_half = (u.real ** 2 + u.imag ** 2) * u
-        us = torch.exp(-.5j * self.dt * rho_half) * u
-        iA = -1j * self.L.astype(np.complex128)
+        us = torch.exp(-.5j * self.dt * rho_half) * u 
+        #L = update_laplacian(self.L.tocoo(), self.nx-2, self.ny-2, float(self.dx), float(self.dy),
+        #        float(self.dt), us, us.reshape(self.nx ** 2).cpu().numpy(), i)
+        L = self.L
+        
         uss = us.reshape((self.nx * self.ny)).cpu().numpy()
-        usss = scipy.sparse.linalg.expm_multiply(iA.multiply(self.dt),  uss)
+        usss = scipy.sparse.linalg.expm_multiply(-L * 1j * float(self.dt),  uss)
         usss = torch.from_numpy(usss).reshape((self.nx, self.ny))
         rho_half = (usss.real ** 2 + usss.imag ** 2) * usss
         un = torch.exp(-.5j * self.dt * rho_half) * usss
@@ -163,6 +240,30 @@ class NLSEStepper:
         #    torch.cos(-.5 * self.dt * rho_half) * usss - 1j * torch.sin(-.5 * self.dt * rho_half) * usss
         #    ) - un))
         return un
+
+    def step_simpler(self, u, i=1.):
+        rho_half = (u.real ** 2 + u.imag ** 2) * u
+        us = torch.exp(-.5j * self.dt * rho_half) * u 
+
+
+        rhs = 1.j * us + .5 * self.dt * u_xx_yy(self.buf, us, self.dx, self.dy)
+        rhs = rhs.reshape(self.nx * self.ny).cpu().numpy()
+
+        L = update_laplacian(self.L.tocoo(), self.nx-2, self.ny-2, float(self.dx), float(self.dy),
+                float(self.dt), us, us.reshape(self.nx ** 2).cpu().numpy(), i)
+
+        self.L = L
+        self.L_lhs = -.5 * float(self.dt) * self.L + 1.j * self.Id_np
+
+        us = scipy.sparse.linalg.spsolve(self.L_lhs, rhs)
+        us = torch.from_numpy(us).reshape((self.nx, self.ny))
+
+        
+        rho_half = (us.real ** 2 + us.imag ** 2) * us
+        un = torch.exp(-.5j * self.dt * rho_half) * us 
+        return un
+        
+
         
     def step_split(self, u):
         def sincos_multiply(A, v, t=1.0): 
@@ -230,7 +331,8 @@ class NLSEStepper:
         u = self.u0
         self.un[0] = u
         for i in tqdm(range(1, self.nt)):
-            u = self.step_full(u) 
+            #u = self.step_simpler(u) 
+            u = self.step_full(u, i)
             #plt.imshow(torch.sqrt(u.real ** 2 + u.imag ** 2))
             #plt.show()
             self.neumann_bc(u)
@@ -326,21 +428,40 @@ def create_2d_dark_solitons_diff(x, y, soliton_params = None) -> torch.Tensor:
 
     return psi
 
+def rogue_wave_seed(x, y): 
+   base = torch.exp(-(x**2 + y**2)/8.0)
+   perturb = 0.1*torch.cos(x/2)*torch.cos(y/2)
+   return base*(1.0 + perturb) + torch.tensor(0.j)
 
-nx = ny = 64
+def ring_collision(x, y):
+   r1 = torch.sqrt((x+5.0)**2 + y**2)
+   r2 = torch.sqrt((x-5.0)**2 + y**2)
+   width = 1.0
+   ring1 = torch.exp(-(r1-2.0)**2/(2*width**2))*(torch.cos(x) - 1j* torch.sin(x))
+   ring2 = torch.exp(-(r2-2.0)**2/(2*width**2))*(torch.cos(-x) - 1j* torch.sin(-x))
+   return (ring1 + ring2)/2
+
+
+nx = 100
+ny = 100
 Lx = Ly = 20
 
 xn = torch.linspace(-Lx/2, Lx/2, nx)
 yn = torch.linspace(-Ly/2, Ly/2, ny)
 x, y = torch.meshgrid(xn, yn, indexing='ij')
 
+
+
+
+
 k0 = .5
 theta = torch.tensor(torch.pi/4)
 kx = k0*torch.cos(theta)
 ky = k0*torch.sin(theta)
 
-sigma = 1.
+sigma = .3
 A = 1.0
+#u0 = ring_collision(x, y)
 u0 = gaussian_center(x, y, A, sigma, kx, ky, Lx / nx, Ly / ny)
 #u0 = dnoidal_wave(x, y, kx, ky)
 #u0 = two_soliton_collision(x, y, t=2., v1=3., v2=-3.)
@@ -350,8 +471,8 @@ u0 = gaussian_center(x, y, A, sigma, kx, ky, Lx / nx, Ly / ny)
 
 dt = 1e-2
 T = 1.
-nt = 200
-num_snapshots = 100 
+nt = 300
+num_snapshots = 50 
 snap_f = nt // num_snapshots
 
 solver = NLSEStepper(nx, ny, Lx, Ly, dt, int(nt), u0, snapshot_freq=snap_f)
