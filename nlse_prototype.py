@@ -62,25 +62,148 @@ def build_D2(nx, ny, dx, dy, dtype):
     L *= (1 / dx) ** 2
     return L
 
+def build_D2_periodic(nx, ny, dx, dy, dtype):
+    assert nx == ny
+    assert dx == dy
+    N = (nx + 2) ** 2
+    middle_diag = -4 * torch.ones(nx + 2, dtype=dtype)
+    diag = torch.cat([middle_diag] * (nx + 2))
+    offdiag_pos = torch.ones(N - 1, dtype=dtype)
+    inner_outer_identity = torch.ones(N - (nx + 2), dtype=dtype)
+    indices_main = torch.arange(N, dtype=torch.long)
+    indices_off1 = torch.arange(1, N, dtype=torch.long)
+    indices_off2 = torch.arange(0, N - 1, dtype=torch.long)
+    row_indices = torch.cat([
+        indices_main,
+        indices_off1, indices_off2,
+        indices_main[:-(nx+2)],
+        indices_main[nx+2:]
+    ])
+    col_indices = torch.cat([
+        indices_main,
+        indices_off2, indices_off1,
+        indices_main[nx+2:],
+        indices_main[:-nx-2]
+    ])
+    values = torch.cat([
+        diag,
+        offdiag_pos, offdiag_pos,
+        inner_outer_identity,
+        inner_outer_identity
+    ])
+    left_edge = torch.arange(0, N, nx + 2, dtype=torch.long)
+    right_edge = torch.arange(nx + 1, N, nx + 2, dtype=torch.long)
+    row_indices = torch.cat([
+        row_indices,
+        left_edge, right_edge
+    ])
+    col_indices = torch.cat([
+        col_indices,
+        right_edge, left_edge
+    ])
+    pb_values = torch.ones(2 * len(left_edge), dtype=dtype)
+    values = torch.cat([values, pb_values])
+    top_edge = torch.arange(0, nx + 2, dtype=torch.long)
+    bottom_edge = torch.arange(N - (nx + 2), N, dtype=torch.long)
+    row_indices = torch.cat([
+        row_indices,
+        top_edge, bottom_edge
+    ])
+    col_indices = torch.cat([
+        col_indices,
+        bottom_edge, top_edge
+    ])
+    pb_values = torch.ones(2 * len(top_edge), dtype=dtype)
+    values = torch.cat([values, pb_values])
+    L = torch.sparse_coo_tensor(
+        indices=torch.stack([row_indices, col_indices]),
+        values=values,
+        size=(N, N),
+        dtype=dtype,
+    )
+    L *= (1 / dx) ** 2
+    return L
+
+def build_D2_radiation(nx, ny, dx, dy, dtype, alpha=1.0):
+    assert nx == ny
+    assert dx == dy
+    N = (nx + 2) ** 2
+    middle_diag = -4 * torch.ones(nx + 2, dtype=dtype)
+    middle_diag[0] = middle_diag[-1] = -3
+    diag = torch.cat([middle_diag] * (nx + 2))
+    diag[:nx+2] = -3 
+    diag[-nx-2:] = -3  
+    diag[::nx+2] = -3 
+    diag[nx+1::nx+2] = -3  
+    diag[0] = diag[nx+1] = diag[-nx-2] = diag[-1] = -2 
+
+    offdiag_pos = torch.ones(N - 1, dtype=dtype)
+    inner_outer_identity = torch.ones(N - (nx + 2), dtype=dtype)
+
+    indices_main = torch.arange(N, dtype=torch.long)
+    indices_off1 = torch.arange(1, N, dtype=torch.long)
+    indices_off2 = torch.arange(0, N - 1, dtype=torch.long)
+
+    row_indices = torch.cat([
+        indices_main,
+        indices_off1, indices_off2,
+        indices_main[:-(nx+2)],
+        indices_main[nx+2:]
+    ])
+
+    col_indices = torch.cat([
+        indices_main,
+        indices_off2, indices_off1,
+        indices_main[nx+2:],
+        indices_main[:-nx-2]
+    ])
+
+    values = torch.cat([
+        diag,
+        offdiag_pos, offdiag_pos,
+        inner_outer_identity,
+        inner_outer_identity
+    ])
+
+    L = torch.sparse_coo_tensor(
+        indices=torch.stack([row_indices, col_indices]),
+        values=values,
+        size=(N, N),
+        dtype=dtype,
+    )
+    L *= (1 / dx) ** 2
+    return L
+
 
 def animate(X, Y, data, dt, num_snapshots, nt, title):
     mxl, mxr = x == -Lx /2, x == Lx /2 
     myl, myr = y == -Ly /2, y == Ly /2
+
+    
+    
+    #prob_density = [
+    #        (np.log(np.min(d.cpu().numpy().real ** 2 + d.cpu().numpy().imag ** 2)),
+    #            np.log(np.max(d.cpu().numpy().real ** 2 + d.cpu().numpy().imag ** 2)))
+    #        for d in data]
+    #vmin = min(pd[0] for pd in prob_density)
+    #vmax = max(pd[1] for pd in prob_density)
     
     from matplotlib.animation import FuncAnimation
     fig = plt.figure(figsize=(20, 20))
     ax = fig.add_subplot(111, projection='3d')
     surf = ax.plot_surface(X, Y, data[0], cmap='viridis',)
+    
     def update(frame):
         ax.clear() 
         #ax.scatter(X, Y, mxl, color='r')    
         #ax.scatter(X, Y, myl, color='b')
-
+        # [10:-10,10:-10]
         ax.plot_surface(X, Y,
-                #data[frame].cpu().numpy().real ** 2 + data[frame].cpu().numpy().imag ** 2,
-                data[frame].cpu().numpy().real,
-                cmap='viridis')
-        ax.set_title(f"{title}, t={(frame * dt * (nt / num_snapshots)):.2f}")
+                (data[frame].cpu().numpy().real ** 2 + data[frame].cpu().numpy().imag ** 2),
+                #data[frame].cpu().numpy().real,
+                cmap='jet',)
+        #ax.set_zlim(vmin, vmax)
+        #ax.set_title(f"{title}, t={(frame * dt * (nt / num_snapshots)):.2f}")
 
     fps = 3
     ani = FuncAnimation(fig, update, frames=num_snapshots, interval=num_snapshots / fps, )
@@ -96,11 +219,12 @@ def u_xx_yy(buf, a, dx, dy):
     return uxx_yy
 
 def gaussian_center(x, y, A, sigma, kx, ky, dx, dy):
-    un1 =  A * torch.exp(-((x - 4) ** 2 +  (y - 2.) ** 2) / 4 / sigma ** 2) * torch.exp(1j * (x + y))  
-    un2 =  A * torch.exp(-((x + 4)** 2 +  (y + 2.) ** 2) / 4 / sigma ** 2) * torch.exp(-1j * (x + y))
+    un1 =  A * torch.exp(-((x - 3) ** 2 +  (y - 3.) ** 2) / 4 / sigma ** 2) * torch.exp(1j * (x + y))  
+    un2 =  A * torch.exp(-((x + 3)** 2 +  (y + 3.) ** 2) / 4 / sigma ** 2) * torch.exp(-1j * (x + y))
     un = un1 + un2
     norm = torch.sqrt(torch.sum(un.real ** 2 + un.imag ** 2))
     return un / norm
+
 
 def estimate_k(u, dx, dy):
     fx = torch.fft.fft2(u)
@@ -163,8 +287,90 @@ def update_laplacian(L, nx, ny, dx, dy, dt, u_torch, u_numpy, i=1):
     bottom_boundary = np.arange(0, nx+2)
     top_boundary = np.arange((ny-1)*(nx+2), ny*(nx+2))
     all_boundaries = np.concatenate([left_boundary, right_boundary, bottom_boundary, top_boundary])
-    L.data[all_boundaries] *= 2/3  # Changes -3 to -2
+    L.data[all_boundaries] *= 2/3
+    return L
 
+def build_D2_pml(nx, ny, dx, dy, dtype, pml_width=10, sigma_max=2.0):
+    assert nx == ny
+    assert dx == dy
+    N = (nx + 2) ** 2 
+    sigma_x = torch.zeros((ny+2, nx+2), dtype=torch.complex128)
+    sigma_y = torch.zeros((ny+2, nx+2), dtype=torch.complex128)
+    
+    for i in range(nx+2):
+        for j in range(ny+2):
+            if i < pml_width:
+                d = (pml_width - i)/pml_width
+                sigma_x[j,i] = sigma_max * (d**2)
+            elif i >= nx+2-pml_width:
+                d = (i - (nx+2-pml_width))/pml_width
+                sigma_x[j,i] = sigma_max * (d**2) 
+            if j < pml_width:
+                d = (pml_width - j)/pml_width
+                sigma_y[j,i] = sigma_max * (d**2)
+            elif j >= ny+2-pml_width:
+                d = (j - (ny+2-pml_width))/pml_width
+                sigma_y[j,i] = sigma_max * (d**2)
+
+    omega = 60*torch.pi 
+    s_x = 1/(1 + 1j*sigma_x/omega)
+    s_y = 1/(1 + 1j*sigma_y/omega)
+    
+    A = s_y/s_x
+    B = s_x/s_y  
+    C = s_x*s_y
+
+    middle_diag = torch.zeros((ny+2, nx+2), dtype=torch.complex128)
+    for j in range(ny+2):
+        for i in range(nx+2):
+            middle_diag[j,i] = -2*(A[j,i] + B[j,i])
+
+    diag = middle_diag.flatten()
+    offdiag_x = torch.zeros(N-1, dtype=torch.complex128) 
+    offdiag_y = torch.zeros(N-(nx+2), dtype=torch.complex128)
+
+    for j in range(ny+2):
+        for i in range(nx+1):
+            idx = j*(nx+2) + i
+            offdiag_x[idx] = 0.5*(A[j,i] + A[j,i+1])
+
+    for j in range(ny+1):
+        for i in range(nx+2):
+            idx = j*(nx+2) + i
+            offdiag_y[idx] = 0.5*(B[j,i] + B[j+1,i])
+            
+    indices_main = torch.arange(N, dtype=torch.long)
+    indices_off1 = torch.arange(1, N, dtype=torch.long)
+    indices_off2 = torch.arange(0, N-1, dtype=torch.long)
+    
+    row_indices = torch.cat([
+        indices_main,
+        indices_off1, indices_off2,
+        indices_main[:-(nx+2)],
+        indices_main[nx+2:]
+    ])
+    
+    col_indices = torch.cat([
+        indices_main,
+        indices_off2, indices_off1,
+        indices_main[nx+2:],
+        indices_main[:-nx-2]
+    ])
+    
+    values = torch.cat([
+        diag,
+        offdiag_x, offdiag_x,
+        offdiag_y, offdiag_y
+    ])
+    
+    L = torch.sparse_coo_tensor(
+        indices=torch.stack([row_indices, col_indices]),
+        values=values,
+        size=(N, N),
+        dtype=torch.complex128
+    )
+    
+    L *= (1/dx)**2
     return L
 
 class NLSEStepper:
@@ -179,6 +385,7 @@ class NLSEStepper:
         self.dt = torch.tensor(dt)
 
         self.L = (build_D2(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128))
+        #self.L = build_D2_radiation(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128) 
         
         self.Id = torch.sparse_coo_tensor(
                torch.tensor([[i, i] for i in range(nx * ny)]).T,
@@ -187,7 +394,11 @@ class NLSEStepper:
         self.Id_np = torch_sparse_to_scipy_sparse(self.Id)
         
         self.L_lhs = torch_sparse_to_scipy_sparse( -.5 * self.dt * self.L + 1.j * self.Id).tocsr() 
+
+        self.L_split_lhs = torch_sparse_to_scipy_sparse(self.Id - .5j * float(self.dt) * self.L).tocsr()
         self.L = torch_sparse_to_scipy_sparse(self.L).tocsr()
+
+         
         
 
 
@@ -220,6 +431,25 @@ class NLSEStepper:
 
         """    
     def step_full(self, u, i=1):
+        def barrier(x, y):
+            # V(x,y) = V₀/2 * (tanh((w - |x + y|)/ε) + 1)
+            V0 = 1e1
+            L = x.max() - x.min() 
+            d = torch.abs(y - x) / L 
+            w = .1
+            V = V0 * torch.exp(-(d/w)**2) 
+            #return V0 * d # hard barrier
+            return V # smoothened barrier
+
+        def create_double_slit(x, y, V0=1e10):
+            mask = (torch.abs(x) < 0.1).float()
+            
+            slit1 = ((y < -3.1) | (y > -2.9)).float()
+            slit2 = ((y < 2.9) | (y > 3.1)).float()
+            
+            V = V0 * mask * slit1 * slit2
+            return V
+
         # fully complex evolution
         rho_half = (u.real ** 2 + u.imag ** 2) * u
         us = torch.exp(-.5j * self.dt * rho_half) * u 
@@ -229,6 +459,7 @@ class NLSEStepper:
         
         uss = us.reshape((self.nx * self.ny)).cpu().numpy()
         usss = scipy.sparse.linalg.expm_multiply(-L * 1j * float(self.dt),  uss)
+        
         usss = torch.from_numpy(usss).reshape((self.nx, self.ny))
         rho_half = (usss.real ** 2 + usss.imag ** 2) * usss
         un = torch.exp(-.5j * self.dt * rho_half) * usss
@@ -265,43 +496,19 @@ class NLSEStepper:
         
 
         
-    def step_split(self, u):
-        def sincos_multiply(A, v, t=1.0): 
-            exp_plus  = scipy.sparse.linalg.expm_multiply(complex( 1j * t) * A, v)
-            exp_minus = scipy.sparse.linalg.expm_multiply(complex(-1j * t) * A,  v)
-            sinAv = ((exp_plus - exp_minus)/(2j)).real
-            cosAv = ((exp_plus + exp_minus)/2).real
-            return sinAv, cosAv
-
-        # split evolution
-        v = u.real
-        w = u.imag
-        rho1 = v ** 2 + w ** 2
-
-        theta = -.5 * self.dt * rho1
-        vs = w * torch.cos(theta) - v * torch.sin(theta)
-        ws = v * torch.cos(theta) + w * torch.sin(theta)
-
-        #vs = torch.exp(-.5 * self.dt * rho1 * w) * w
-        #ws = torch.exp(-.5 * self.dt * rho1 * v) * v 
-
-        vs = vs.reshape((self.nx * self.ny)).cpu().numpy()
-        ws = ws.reshape((self.nx * self.ny)).cpu().numpy()
-        sin1, cos1 = sincos_multiply(complex(-1j) * self.L, vs, t=self.dt) 
-        sin2, cos2 = sincos_multiply(complex(-1j) * self.L, ws, t=self.dt) 
-        vss = cos1 - sin2
-        wss = sin1 + cos2
-        vss = torch.from_numpy(vss).reshape((self.nx, self.ny))
-        wss = torch.from_numpy(wss).reshape((self.nx, self.ny))
-
-        rho2 = vss ** 2 + wss ** 2
-        theta = -.5 * self.dt * rho1
-        vsss = wss * torch.cos(theta) - vss * torch.sin(theta)
-        wsss = vss * torch.cos(theta) + wss * torch.sin(theta)
-
-        #vsss = torch.exp(-.5 * self.dt * rho2 * w) * wss 
-        #wsss = torch.exp(-.5 * self.dt * rho2 * v) * vss
-        un = vsss + 1j * wsss    
+    def step_split(self, u, i):
+        # split evolution 
+        rho_half = torch.abs(u)
+        us = torch.exp(-.5j * self.dt * rho_half) * u 
+        
+        rhs = us + .5j * float(self.dt) * u_xx_yy(self.buf, us, self.dx, self.dy)
+        rhs = rhs.reshape(self.nx ** 2).cpu().numpy()
+        uss = scipy.sparse.linalg.spsolve(self.L_split_lhs, rhs)
+        uss = torch.from_numpy(uss).reshape((self.nx, self.ny))
+        usss = uss
+        rho_half = torch.abs(usss)
+        un = torch.exp(-.5j * self.dt * rho_half) * usss
+        
         return un
 
 
@@ -332,12 +539,14 @@ class NLSEStepper:
         self.un[0] = u
         for i in tqdm(range(1, self.nt)):
             #u = self.step_simpler(u) 
-            u = self.step_full(u, i)
+            #u = self.step_full(u, i)
+            u = self.step_split(u, i)
             #plt.imshow(torch.sqrt(u.real ** 2 + u.imag ** 2))
             #plt.show()
-            self.neumann_bc(u)
+            #self.neumann_bc(u)
             #self.radiation_bc(u)
             if i % self.sf == 0:
+                
                 self.un[i // self.sf] = u.clone()
 
     def energy(self, u):
@@ -441,9 +650,14 @@ def ring_collision(x, y):
    ring2 = torch.exp(-(r2-2.0)**2/(2*width**2))*(torch.cos(-x) - 1j* torch.sin(-x))
    return (ring1 + ring2)/2
 
+def initial_slit(x, y, k0=5.0): 
+    mask = (x < -5.0).float()
+    u0 = mask * torch.exp(-1j * k0 * x)  
+    return u0 / torch.sqrt(torch.sum(torch.abs(u0)**2))
 
-nx = 100
-ny = 100
+
+nx = 128
+ny = 128
 Lx = Ly = 20
 
 xn = torch.linspace(-Lx/2, Lx/2, nx)
@@ -461,6 +675,7 @@ ky = k0*torch.sin(theta)
 
 sigma = .3
 A = 1.0
+#u0 = initial_slit(x, y)
 #u0 = ring_collision(x, y)
 u0 = gaussian_center(x, y, A, sigma, kx, ky, Lx / nx, Ly / ny)
 #u0 = dnoidal_wave(x, y, kx, ky)
@@ -469,11 +684,13 @@ u0 = gaussian_center(x, y, A, sigma, kx, ky, Lx / nx, Ly / ny)
 
 
 
-dt = 1e-2
+dt = 5e-3
 T = 1.
-nt = 300
+nt = 150
 num_snapshots = 50 
 snap_f = nt // num_snapshots
+
+print((nx/Lx) / dt)
 
 solver = NLSEStepper(nx, ny, Lx, Ly, dt, int(nt), u0, snapshot_freq=snap_f)
 
