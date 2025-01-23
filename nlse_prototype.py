@@ -384,8 +384,8 @@ class NLSEStepper:
         self.u0 = initial_u.clone()
         self.dt = torch.tensor(dt)
 
-        self.L = (build_D2(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128))
-        #self.L = build_D2_radiation(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128) 
+        #self.L = (build_D2(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128))
+        self.L = build_D2_radiation(nx-2, ny-2, Lx/(nx-1), Ly/(ny-1), torch.complex128) 
         
         self.Id = torch.sparse_coo_tensor(
                torch.tensor([[i, i] for i in range(nx * ny)]).T,
@@ -395,11 +395,11 @@ class NLSEStepper:
         
         self.L_lhs = torch_sparse_to_scipy_sparse( -.5 * self.dt * self.L + 1.j * self.Id).tocsr() 
 
-        self.L_split_lhs = torch_sparse_to_scipy_sparse(self.Id - .5j * float(self.dt) * self.L).tocsr()
+        self.L_split_lhs = torch_sparse_to_scipy_sparse(self.Id + .5j * float(self.dt) * self.L).tocsr()
+        self.LU = scipy.sparse.linalg.splu(self.L_split_lhs)
         self.L = torch_sparse_to_scipy_sparse(self.L).tocsr()
 
          
-        
 
 
         self.sf = snapshot_freq
@@ -501,11 +501,12 @@ class NLSEStepper:
         rho_half = torch.abs(u)
         us = torch.exp(-.5j * self.dt * rho_half) * u 
         
-        rhs = us + .5j * float(self.dt) * u_xx_yy(self.buf, us, self.dx, self.dy)
-        rhs = rhs.reshape(self.nx ** 2).cpu().numpy()
-        uss = scipy.sparse.linalg.spsolve(self.L_split_lhs, rhs)
+        rhs = us - 5.j * float(self.dt) * u_xx_yy(self.buf, us, self.dx, self.dy)
+        rhs = rhs.reshape(self.nx ** 2).cpu().numpy() 
+        uss = self.LU.solve(rhs)
         uss = torch.from_numpy(uss).reshape((self.nx, self.ny))
         usss = uss
+
         rho_half = torch.abs(usss)
         un = torch.exp(-.5j * self.dt * rho_half) * usss
         
@@ -547,7 +548,9 @@ class NLSEStepper:
             #self.radiation_bc(u)
             if i % self.sf == 0:
                 
-                self.un[i // self.sf] = u.clone()
+                self.un[i // self.sf] = torch.abs(
+                        u.clone() - self.step_full(u, i)
+                        )
 
     def energy(self, u):
         ux = (u[2:, 1:-1] - u[:-2, 1:-1]) / (2 * self.dx)
@@ -684,10 +687,10 @@ u0 = gaussian_center(x, y, A, sigma, kx, ky, Lx / nx, Ly / ny)
 
 
 
-dt = 5e-3
+dt = 1e-3
 T = 1.
-nt = 150
-num_snapshots = 50 
+nt = 1500
+num_snapshots = 100 
 snap_f = nt // num_snapshots
 
 print((nx/Lx) / dt)
